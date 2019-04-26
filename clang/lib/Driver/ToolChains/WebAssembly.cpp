@@ -74,22 +74,30 @@ void wasm::Linker::ConstructJob(Compilation &C, const JobAction &JA,
   Args.AddAllArgs(CmdArgs, options::OPT_u);
   ToolChain.AddFilePathLibArgs(Args, CmdArgs);
 
-  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles))
-    CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt1.o")));
+  if (JA.isDeviceOffloading(Action::OFK_OpenMP)) {
+    // TODO
+    CmdArgs.push_back("--no-entry");
+    CmdArgs.push_back("--export-all");
+    CmdArgs.push_back("--allow-undefined");
+    AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
+  } else {
+    if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nostartfiles))
+      CmdArgs.push_back(Args.MakeArgString(ToolChain.GetFilePath("crt1.o")));
 
-  AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
+    AddLinkerInputs(ToolChain, Inputs, Args, CmdArgs, JA);
 
-  if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs)) {
-    if (ToolChain.ShouldLinkCXXStdlib(Args))
-      ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
+    if (!Args.hasArg(options::OPT_nostdlib, options::OPT_nodefaultlibs)) {
+      if (ToolChain.ShouldLinkCXXStdlib(Args))
+        ToolChain.AddCXXStdlibLibArgs(Args, CmdArgs);
 
-    if (Args.hasArg(options::OPT_pthread)) {
-      CmdArgs.push_back("-lpthread");
-      CmdArgs.push_back("--shared-memory");
+      if (Args.hasArg(options::OPT_pthread)) {
+        CmdArgs.push_back("-lpthread");
+        CmdArgs.push_back("--shared-memory");
+      }
+
+      CmdArgs.push_back("-lc");
+      AddRunTimeLibs(ToolChain, ToolChain.getDriver(), CmdArgs, Args);
     }
-
-    CmdArgs.push_back("-lc");
-    AddRunTimeLibs(ToolChain, ToolChain.getDriver(), CmdArgs, Args);
   }
 
   CmdArgs.push_back("-o");
@@ -183,6 +191,8 @@ void WebAssembly::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
           getMultiarchTriple(getDriver(), getTriple(), getDriver().SysRoot);
       addSystemInclude(DriverArgs, CC1Args, getDriver().SysRoot + "/include/" + MultiarchTriple);
     }
+    // TODO
+    addSystemInclude(DriverArgs, CC1Args, "/usr/include/" + getTriple().getArchName());
     addSystemInclude(DriverArgs, CC1Args, getDriver().SysRoot + "/include");
   }
 }
