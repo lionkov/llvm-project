@@ -197,6 +197,12 @@ endif()
 set(LIBOMP_USE_ITT_NOTIFY TRUE CACHE BOOL
   "Enable ITT notify?")
 
+# SICM support
+set(LIBOMP_USE_SICM TRUE CACHE BOOL
+  "Enable SICM suppoort?")
+
+set(LIBOMP_SICM_PATH "/usr" CACHE PATH "SICM Path")
+
 # normal, profile, stubs library.
 set(NORMAL_LIBRARY FALSE)
 set(STUBS_LIBRARY FALSE)
@@ -390,6 +396,7 @@ if(${OPENMP_STANDALONE_BUILD})
   libomp_say("Use quad precision   -- ${LIBOMP_USE_QUAD_PRECISION}")
   libomp_say("Use TSAN-support     -- ${LIBOMP_TSAN_SUPPORT}")
   libomp_say("Use Hwloc library    -- ${LIBOMP_USE_HWLOC}")
+  libomp_say("Use SICM library     -- ${LIBOMP_USE_SICM}")
 endif()
 
 add_subdirectory(src)

@@ -950,6 +950,19 @@ typedef struct {
   omp_uintptr_t value;
 } omp_alloctrait_t;
 
+enum {
+  OMP_ATA_NULL = 0,
+  OMP_ATA_DEFAULT = 1,
+  OMP_ATA_LARGE_CAP = 2,
+  OMP_ATA_CONST = 3,
+  OMP_ATA_HIGH_BW = 4,
+  OMP_ATA_LOW_LAT = 5,
+  OMP_ATA_CGROUP = 6,
+  OMP_ATA_PTEAM = 7,
+  OMP_ATA_THREAD = 8,
+  OMP_ATA_LAST = 9,
+};
+
 typedef void *omp_allocator_handle_t;
 extern omp_allocator_handle_t const omp_null_allocator;
 extern omp_allocator_handle_t const omp_default_mem_alloc;
@@ -972,13 +985,25 @@ typedef omp_memspace_handle_t kmp_memspace_t; // placeholder
 
 typedef struct kmp_allocator_t {
   omp_memspace_handle_t memspace;
-  void **memkind; // pointer to memkind
+
+  /* traits */
   int alignment;
   omp_alloctrait_value_t fb;
-  kmp_allocator_t *fb_data;
+  omp_allocator_handle_t fb_data;
   kmp_uint64 pool_size;
+  int partition;
+
+  /* custom allocators */
+  void *(*alloc)(size_t size, kmp_allocator_t *, int gtid);
+  void (*free)(void *p, kmp_allocator_t *, int gtid);
+
   kmp_uint64 pool_used;
+  void *aux;
 } kmp_allocator_t;
+
+extern kmp_allocator_t kmp_standard_allocators[];
+extern int (*kmp_init_allocator_p)(kmp_allocator_t *);
+extern void (*kmp_destroy_allocator_p)(kmp_allocator_t *);
 
 extern omp_allocator_handle_t __kmpc_init_allocator(int gtid,
                                                     omp_memspace_handle_t,
@@ -992,6 +1017,9 @@ extern void __kmpc_free(int gtid, void *ptr, omp_allocator_handle_t al);
 
 extern void __kmp_init_memkind();
 extern void __kmp_fini_memkind();
+
+extern void __kmp_init_sicm();
+extern void __kmp_fini_sicm();
 #endif // OMP_50_ENABLED
 
 /* ------------------------------------------------------------------------ */
