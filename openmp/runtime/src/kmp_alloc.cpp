@@ -1335,6 +1335,8 @@ omp_allocator_handle_t __kmpc_init_allocator(int gtid, omp_memspace_handle_t ms,
     al->fb_data = omp_default_mem_alloc;
   }
 
+  al->alloc = kmp_default_alloc;
+  al->free = kmp_default_free;
   if (kmp_init_allocator_p != NULL && kmp_init_allocator_p(al) != 0) {
     // something went wrong, bail
     __kmp_free(al);

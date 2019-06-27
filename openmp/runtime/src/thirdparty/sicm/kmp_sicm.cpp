@@ -9,8 +9,8 @@ static void *h_sicm;
 static sicm_device_list (*p_sicm_init)(void);
 static sicm_arena (*p_sicm_arena_create)(size_t, int, sicm_device_list *);
 static void (*p_sicm_arena_destroy)(sicm_arena arena);
-static sicm_device *(*p_sicm_arena_get_device)(sicm_arena sa);
-static int (*p_sicm_arena_set_device)(sicm_arena sa, sicm_device *dev);
+static sicm_device *(*p_sicm_arena_get_devices)(sicm_arena sa);
+static int (*p_sicm_arena_set_devices)(sicm_arena sa, sicm_device *dev);
 static void *(*p_sicm_arena_alloc)(sicm_arena sa, size_t sz);
 static void (*p_sicm_free)(void *ptr);
 
@@ -50,35 +50,41 @@ static void kmp_sicm_init_device_list(sicm_device_list *devs, int tag) {
 void __kmp_init_sicm() {
 #if KMP_OS_UNIX && KMP_DYNAMIC_LIB
 	h_sicm = dlopen("libsicm.so", RTLD_LAZY);
-	if (!h_sicm)
+	if (!h_sicm) {
+		KE_TRACE(25, ("can't load libsicm.so: %s\n", dlerror()));
 		goto error;
+	}
 
 	p_sicm_init = (sicm_device_list (*)(void)) dlsym(h_sicm, "sicm_init");
 	p_sicm_arena_create = (sicm_arena (*)(size_t, int, sicm_device_list *)) dlsym(h_sicm, "sicm_arena_create");
-	p_sicm_arena_destroy = (void (*)(sicm_arena)) dlsym(h_sicm, "sicm_arena_destory");
-	p_sicm_arena_get_device = (sicm_device *(*)(sicm_arena sa)) dlsym(h_sicm, "sicm_arena_get_device");
-	p_sicm_arena_set_device = (int (*)(sicm_arena sa, sicm_device *dev)) dlsym(h_sicm, "sicm_arena_set_device");
+	p_sicm_arena_destroy = (void (*)(sicm_arena)) dlsym(h_sicm, "sicm_arena_destroy");
+	p_sicm_arena_get_devices = (sicm_device *(*)(sicm_arena sa)) dlsym(h_sicm, "sicm_arena_get_devices");
+	p_sicm_arena_set_devices = (int (*)(sicm_arena sa, sicm_device *dev)) dlsym(h_sicm, "sicm_arena_set_devices");
 	p_sicm_arena_alloc = (void *(*)(sicm_arena sa, size_t sz)) dlsym(h_sicm, "sicm_arena_alloc");
 	p_sicm_free = (void (*)(void *ptr)) dlsym(h_sicm, "sicm_free");
 
-	if (!p_sicm_init || !p_sicm_arena_create || !p_sicm_arena_destroy || !p_sicm_arena_get_device || 
-			!p_sicm_arena_set_device || !p_sicm_arena_alloc || !p_sicm_free)
+	if (!p_sicm_init || !p_sicm_arena_create || !p_sicm_arena_destroy || !p_sicm_arena_get_devices || 
+			!p_sicm_arena_set_devices || !p_sicm_arena_alloc || !p_sicm_free)
 		goto error;
 
+	KE_TRACE(25, ("__kmp_init_sicm: Initializing SICM support\n"));
 	kmp_sicm_devs = p_sicm_init();
 	kmp_init_allocator_p = kmp_sicm_init_allocator;
-        for(int i = 0; i < 9; i++) {
-          kmp_standard_allocators[0].alloc = kmp_sicm_alloc;
-          kmp_standard_allocators[1].free = kmp_sicm_free;
-        }
-
 	kmp_sicm_init_device_list(&kmp_sicm_default_devs, SICM_DRAM);
+	KE_TRACE(25, ("__kmp_init_sicm: Default memspace: %d devices\n", kmp_sicm_default_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_large_cap_devs, -1 /*SICM_OPTANE*/);
+	KE_TRACE(25, ("__kmp_init_sicm: Large-capacity memspace: %d devices\n", kmp_sicm_default_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_const_devs, -1);
+	KE_TRACE(25, ("__kmp_init_sicm: Constant memspace: %d devices\n", kmp_sicm_default_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_high_bw_devs, SICM_KNL_HBM);
-	kmp_sicm_init_device_list(&kmp_sicm_high_bw_devs, -1);
+	KE_TRACE(25, ("__kmp_init_sicm: High-bandwidth memspace: %d devices\n", kmp_sicm_default_devs.count));
+	kmp_sicm_init_device_list(&kmp_sicm_low_lat_devs, -1);
+	KE_TRACE(25, ("__kmp_init_sicm: Low-latency memspace: %d devices\n", kmp_sicm_default_devs.count));
 
-	KE_TRACE(25, ("__kmp_init_memkind: memkind library initialized\n"));
+        for(int i = 0; i < 9; i++)
+	  kmp_sicm_init_allocator(&kmp_standard_allocators[i]);
+
+	KE_TRACE(25, ("__kmp_init_sicm: SICM library initialized\n"));
 	return;
 
 error:
@@ -86,25 +92,27 @@ error:
 
 	p_sicm_init = NULL;
 	p_sicm_arena_create = NULL;
-	p_sicm_arena_get_device = NULL;
-	p_sicm_arena_set_device = NULL;
+	p_sicm_arena_get_devices = NULL;
+	p_sicm_arena_set_devices = NULL;
 	p_sicm_arena_alloc = NULL;
 	p_sicm_free = NULL;
-	dlclose(h_sicm);
+	if (h_sicm)
+		dlclose(h_sicm);
 	h_sicm = NULL;
 
 	return;
 }
 
 void __kmp_fini_sicm() {
-	dlclose(h_sicm);
+	if (h_sicm)
+		dlclose(h_sicm);
+
 	p_sicm_init = NULL;
 	p_sicm_arena_create = NULL;
-	p_sicm_arena_get_device = NULL;
-	p_sicm_arena_set_device = NULL;
+	p_sicm_arena_get_devices = NULL;
+	p_sicm_arena_set_devices = NULL;
 	p_sicm_arena_alloc = NULL;
 	p_sicm_free = NULL;
-	dlclose(h_sicm);
 	h_sicm = NULL;
 }
 
@@ -114,6 +122,7 @@ int kmp_sicm_init_allocator(kmp_allocator_t *al) {
 
   KMP_ASSERT(p_sicm_arena_create != NULL);
 
+  al->aux = NULL;
   devs = NULL;
   if (al->memspace == omp_default_mem_space) {
     devs = &kmp_sicm_default_devs;
@@ -130,9 +139,15 @@ int kmp_sicm_init_allocator(kmp_allocator_t *al) {
   if (devs == NULL)
     return -1;
 
+  if (devs->count == 0)
+    return -1;
+
   sa = p_sicm_arena_create(al->pool_size, 0, devs);
   if (sa == NULL)
     return -1;
+
+  al->alloc = kmp_sicm_alloc;
+  al->free = kmp_sicm_free;
 
   al->aux = sa;
   return 0;
