@@ -13,6 +13,7 @@ static sicm_device *(*p_sicm_arena_get_devices)(sicm_arena sa);
 static int (*p_sicm_arena_set_devices)(sicm_arena sa, sicm_device *dev);
 static void *(*p_sicm_arena_alloc)(sicm_arena sa, size_t sz);
 static void (*p_sicm_free)(void *ptr);
+static int (*p_sicm_device_page_size)(sicm_device *);
 
 static int kmp_sicm_init_allocator(kmp_allocator_t *al);
 static void *kmp_sicm_alloc(size_t size, kmp_allocator_t *al, int gtid);
@@ -31,7 +32,7 @@ static void kmp_sicm_init_device_list(sicm_device_list *devs, int tag) {
   n = 0;
   for(unsigned int i = 0; i < kmp_sicm_devs.count; i++) {
     sicm_device *dev = kmp_sicm_devs.devices[i];
-    if (dev->tag == tag)
+    if (dev->tag == tag && p_sicm_device_page_size(dev) == 4)
       n++;
   }
 
@@ -40,7 +41,7 @@ static void kmp_sicm_init_device_list(sicm_device_list *devs, int tag) {
   n = 0;
   for(unsigned int i = 0; i < kmp_sicm_devs.count; i++) {
     sicm_device *dev = kmp_sicm_devs.devices[i];
-    if (dev->tag == tag) {
+    if (dev->tag == tag && p_sicm_device_page_size(dev) == 4) {
       devs->devices[n] = dev;
       n++;
     }
@@ -51,6 +52,7 @@ void __kmp_init_sicm() {
 #if KMP_OS_UNIX && KMP_DYNAMIC_LIB
 	h_sicm = dlopen("libsicm.so", RTLD_LAZY);
 	if (!h_sicm) {
+//		printf("can't load libsicm.so: %s\n", dlerror());
 		KE_TRACE(25, ("can't load libsicm.so: %s\n", dlerror()));
 		goto error;
 	}
@@ -62,24 +64,33 @@ void __kmp_init_sicm() {
 	p_sicm_arena_set_devices = (int (*)(sicm_arena sa, sicm_device *dev)) dlsym(h_sicm, "sicm_arena_set_devices");
 	p_sicm_arena_alloc = (void *(*)(sicm_arena sa, size_t sz)) dlsym(h_sicm, "sicm_arena_alloc");
 	p_sicm_free = (void (*)(void *ptr)) dlsym(h_sicm, "sicm_free");
+	p_sicm_device_page_size = (int (*)(sicm_device *)) dlsym(h_sicm, "sicm_device_page_size");
 
 	if (!p_sicm_init || !p_sicm_arena_create || !p_sicm_arena_destroy || !p_sicm_arena_get_devices || 
-			!p_sicm_arena_set_devices || !p_sicm_arena_alloc || !p_sicm_free)
+			!p_sicm_arena_set_devices || !p_sicm_arena_alloc || !p_sicm_free || !p_sicm_device_page_size) {
+		printf("can't initialize SICM library\n");
+		KE_TRACE(25, ("can't initialize SICM library\n"));
 		goto error;
+	}
 
 	KE_TRACE(25, ("__kmp_init_sicm: Initializing SICM support\n"));
 	kmp_sicm_devs = p_sicm_init();
 	kmp_init_allocator_p = kmp_sicm_init_allocator;
 	kmp_sicm_init_device_list(&kmp_sicm_default_devs, SICM_DRAM);
+//	printf("__kmp_init_sicm: Default memspace: %d devices\n", kmp_sicm_default_devs.count);
 	KE_TRACE(25, ("__kmp_init_sicm: Default memspace: %d devices\n", kmp_sicm_default_devs.count));
-	kmp_sicm_init_device_list(&kmp_sicm_large_cap_devs, -1 /*SICM_OPTANE*/);
-	KE_TRACE(25, ("__kmp_init_sicm: Large-capacity memspace: %d devices\n", kmp_sicm_default_devs.count));
+	kmp_sicm_init_device_list(&kmp_sicm_large_cap_devs, SICM_OPTANE);
+//	printf("__kmp_init_sicm: Large-capacity memspace: %d devices\n", kmp_sicm_large_cap_devs.count);
+	KE_TRACE(25, ("__kmp_init_sicm: Large-capacity memspace: %d devices\n", kmp_sicm_large_cap_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_const_devs, -1);
-	KE_TRACE(25, ("__kmp_init_sicm: Constant memspace: %d devices\n", kmp_sicm_default_devs.count));
+//	printf("__kmp_init_sicm: Const memspace: %d devices\n", kmp_sicm_const_devs.count);
+	KE_TRACE(25, ("__kmp_init_sicm: Constant memspace: %d devices\n", kmp_sicm_const_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_high_bw_devs, SICM_KNL_HBM);
-	KE_TRACE(25, ("__kmp_init_sicm: High-bandwidth memspace: %d devices\n", kmp_sicm_default_devs.count));
+//	printf("__kmp_init_sicm: High-bandwidth memspace: %d devices\n", kmp_sicm_high_bw_devs.count);
+	KE_TRACE(25, ("__kmp_init_sicm: High-bandwidth memspace: %d devices\n", kmp_sicm_high_bw_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_low_lat_devs, -1);
-	KE_TRACE(25, ("__kmp_init_sicm: Low-latency memspace: %d devices\n", kmp_sicm_default_devs.count));
+//	printf("__kmp_init_sicm: Low-latency memspace: %d devices\n", kmp_sicm_low_lat_devs.count);
+	KE_TRACE(25, ("__kmp_init_sicm: Low-latency memspace: %d devices\n", kmp_sicm_low_lat_devs.count));
 
         for(int i = 0; i < 9; i++)
 	  kmp_sicm_init_allocator(&kmp_standard_allocators[i]);
@@ -136,6 +147,7 @@ int kmp_sicm_init_allocator(kmp_allocator_t *al) {
     devs = &kmp_sicm_low_lat_devs;
   }
 
+//  printf("kmp_sicm_init_allocator: al %p memspace %p devs %d\n", al, al->memspace, devs!=NULL?devs->count:-1);
   if (devs == NULL)
     return -1;
 
@@ -143,8 +155,10 @@ int kmp_sicm_init_allocator(kmp_allocator_t *al) {
     return -1;
 
   sa = p_sicm_arena_create(al->pool_size, 0, devs);
-  if (sa == NULL)
+  if (sa == NULL) {
+//    printf("kmp_sicm_init_allocator: can't create arena\n");
     return -1;
+  }
 
   al->alloc = kmp_sicm_alloc;
   al->free = kmp_sicm_free;
