@@ -75,12 +75,9 @@ future versions of Clang.
 Modified Compiler Flags
 -----------------------
 
-- `clang -dumpversion` now returns the version of Clang itself.
+- ``clang -dumpversion`` now returns the version of Clang itself.
 
-- On ELF, ``-gz`` now defaults to ``-gz=zlib``. It produces ``SHF_COMPRESSED``
-  style compression of debug information. GNU binutils 2.26 or newer, or lld is
-  required to link produced object files. Use ``-gz=zlib-gnu`` to get the old
-  behavior.
+- ...
 
 New Pragmas in Clang
 --------------------
@@ -95,15 +92,20 @@ Attribute Changes in Clang
 Windows Support
 ---------------
 
-- ...
+- clang-cl now treats non-existent files as possible typos for flags,
+  ``clang-cl /diagnostic:caret /c test.cc`` for example now produces
+  ``clang: error: no such file or directory: '/diagnostic:caret'; did you mean '/diagnostics:caret'?``
+
 
 
 C Language Changes in Clang
 ---------------------------
 
-- ...
+- ``__FILE_NAME__`` macro has been added as a Clang specific extension supported
+  in all C-family languages. This macro is similar to ``__FILE__`` except it
+  will always provide the last path component when possible.
 
-...
+- ...
 
 C11 Feature Support
 ^^^^^^^^^^^^^^^^^^^
@@ -123,7 +125,14 @@ C++1z Feature Support
 Objective-C Language Changes in Clang
 -------------------------------------
 
-...
+- Fixed encoding of ObjC pointer types that are pointers to typedefs.
+
+.. code-block:: objc
+
+      typedef NSArray<NSObject *> MyArray;
+
+      // clang used to encode this as "^{NSArray=#}" instead of "@".
+      const char *s0 = @encode(MyArray *);
 
 OpenCL C Language Changes in Clang
 ----------------------------------

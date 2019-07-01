@@ -1415,7 +1415,14 @@ clang::Decl *ClangASTContext::CopyDecl(ASTContext *dst_ast, ASTContext *src_ast,
   FileManager file_manager(file_system_options);
   ASTImporter importer(*dst_ast, file_manager, *src_ast, file_manager, false);
 
-  return importer.Import(source_decl);
+  if (llvm::Expected<clang::Decl *> ret_or_error =
+          importer.Import(source_decl)) {
+    return *ret_or_error;
+  } else {
+    Log *log = lldb_private::GetLogIfAllCategoriesSet(LIBLLDB_LOG_EXPRESSIONS);
+    LLDB_LOG_ERROR(log, ret_or_error.takeError(), "Couldn't import decl: {0}");
+    return nullptr;
+  }
 }
 
 bool ClangASTContext::AreTypesSame(CompilerType type1, CompilerType type2,
@@ -2163,7 +2170,7 @@ FunctionDecl *ClangASTContext::CreateFunctionDeclaration(
       *ast, decl_ctx, SourceLocation(), SourceLocation(), declarationName,
       ClangUtil::GetQualType(function_clang_type), nullptr,
       (clang::StorageClass)storage, is_inline, hasWrittenPrototype,
-      isConstexprSpecified);
+      isConstexprSpecified ? CSK_constexpr : CSK_unspecified);
   if (func_decl)
     decl_ctx->addDecl(func_decl);
 
@@ -2450,7 +2457,7 @@ bool ClangASTContext::DeclsAreEquivalent(clang::Decl *lhs_decl,
       clang::DeclContext *lhs_decl_ctx = lhs_decl->getDeclContext();
       clang::DeclContext *rhs_decl_ctx = rhs_decl->getDeclContext();
       if (lhs_decl_ctx && rhs_decl_ctx) {
-        while (1) {
+        while (true) {
           if (lhs_decl_ctx && rhs_decl_ctx) {
             const clang::Decl::Kind lhs_decl_ctx_kind =
                 lhs_decl_ctx->getDeclKind();
@@ -2488,7 +2495,7 @@ bool ClangASTContext::DeclsAreEquivalent(clang::Decl *lhs_decl,
         // make sure the names match as well
         lhs_decl_ctx = lhs_decl->getDeclContext();
         rhs_decl_ctx = rhs_decl->getDeclContext();
-        while (1) {
+        while (true) {
           switch (lhs_decl_ctx->getDeclKind()) {
           case clang::Decl::TranslationUnit:
             // We don't care about the translation unit names
@@ -3904,6 +3911,14 @@ bool ClangASTContext::IsVoidType(lldb::opaque_compiler_type_t type) {
   return GetCanonicalQualType(type)->isVoidType();
 }
 
+bool ClangASTContext::CanPassInRegisters(const CompilerType &type) {
+  if (auto *record_decl =
+      ClangASTContext::GetAsRecordDecl(type)) {
+    return record_decl->canPassInRegisters();
+  }
+  return false;
+}
+
 bool ClangASTContext::SupportsLanguage(lldb::LanguageType language) {
   return ClangASTContextSupportsLanguage(language);
 }
@@ -5020,7 +5035,7 @@ ClangASTContext::GetBitSize(lldb::opaque_compiler_type_t type,
       ExecutionContext exe_ctx(exe_scope);
       Process *process = exe_ctx.GetProcessPtr();
       if (process) {
-        ObjCLanguageRuntime *objc_runtime = process->GetObjCLanguageRuntime();
+        ObjCLanguageRuntime *objc_runtime = ObjCLanguageRuntime::Get(*process);
         if (objc_runtime) {
           uint64_t bit_size = 0;
           if (objc_runtime->GetTypeBitSize(
@@ -6827,7 +6842,7 @@ CompilerType ClangASTContext::GetChildCompilerTypeAtIndex(
                   process = exe_ctx->GetProcessPtr();
                 if (process) {
                   ObjCLanguageRuntime *objc_runtime =
-                      process->GetObjCLanguageRuntime();
+                      ObjCLanguageRuntime::Get(*process);
                   if (objc_runtime != nullptr) {
                     CompilerType parent_ast_type(getASTContext(),
                                                  parent_qual_type);
@@ -6887,7 +6902,7 @@ CompilerType ClangASTContext::GetChildCompilerTypeAtIndex(
       } else {
         child_is_deref_of_parent = true;
         const char *parent_name =
-            valobj ? valobj->GetName().GetCString() : NULL;
+            valobj ? valobj->GetName().GetCString() : nullptr;
         if (parent_name) {
           child_name.assign(1, '*');
           child_name += parent_name;
@@ -6968,7 +6983,7 @@ CompilerType ClangASTContext::GetChildCompilerTypeAtIndex(
       child_is_deref_of_parent = true;
 
       const char *parent_name =
-          valobj ? valobj->GetName().GetCString() : NULL;
+          valobj ? valobj->GetName().GetCString() : nullptr;
       if (parent_name) {
         child_name.assign(1, '*');
         child_name += parent_name;
@@ -7005,7 +7020,7 @@ CompilerType ClangASTContext::GetChildCompilerTypeAtIndex(
             language_flags);
       } else {
         const char *parent_name =
-            valobj ? valobj->GetName().GetCString() : NULL;
+            valobj ? valobj->GetName().GetCString() : nullptr;
         if (parent_name) {
           child_name.assign(1, '&');
           child_name += parent_name;
@@ -7835,7 +7850,7 @@ clang::EnumDecl *ClangASTContext::GetAsEnumDecl(const CompilerType &type) {
       llvm::dyn_cast<clang::EnumType>(ClangUtil::GetCanonicalQualType(type));
   if (enutype)
     return enutype->getDecl();
-  return NULL;
+  return nullptr;
 }
 
 clang::RecordDecl *ClangASTContext::GetAsRecordDecl(const CompilerType &type) {
@@ -8195,7 +8210,7 @@ clang::CXXMethodDecl *ClangASTContext::AddMethodToCXXRecordType(
             clang::SourceLocation()),
         method_qual_type,
         nullptr, // TypeSourceInfo *
-        explicit_spec, is_inline, is_artificial, false /*is_constexpr*/);
+        explicit_spec, is_inline, is_artificial, CSK_unspecified);
     cxx_method_decl = cxx_ctor_decl;
   } else {
     clang::StorageClass SC = is_static ? clang::SC_Static : clang::SC_None;
@@ -8218,7 +8233,7 @@ clang::CXXMethodDecl *ClangASTContext::AddMethodToCXXRecordType(
                 clang::SourceLocation()),
             method_qual_type,
             nullptr, // TypeSourceInfo *
-            SC, is_inline, false /*is_constexpr*/, clang::SourceLocation());
+            SC, is_inline, CSK_unspecified, clang::SourceLocation());
       } else if (num_params == 0) {
         // Conversion operators don't take params...
         cxx_method_decl = clang::CXXConversionDecl::Create(
@@ -8230,7 +8245,7 @@ clang::CXXMethodDecl *ClangASTContext::AddMethodToCXXRecordType(
                 clang::SourceLocation()),
             method_qual_type,
             nullptr, // TypeSourceInfo *
-            is_inline, explicit_spec, false /*is_constexpr*/,
+            is_inline, explicit_spec, CSK_unspecified,
             clang::SourceLocation());
       }
     }
@@ -8241,7 +8256,7 @@ clang::CXXMethodDecl *ClangASTContext::AddMethodToCXXRecordType(
           clang::DeclarationNameInfo(decl_name, clang::SourceLocation()),
           method_qual_type,
           nullptr, // TypeSourceInfo *
-          SC, is_inline, false /*is_constexpr*/, clang::SourceLocation());
+          SC, is_inline, CSK_unspecified, clang::SourceLocation());
     }
   }
 
@@ -8254,7 +8269,7 @@ clang::CXXMethodDecl *ClangASTContext::AddMethodToCXXRecordType(
   if (is_attr_used)
     cxx_method_decl->addAttr(clang::UsedAttr::CreateImplicit(*getASTContext()));
 
-  if (mangled_name != NULL) {
+  if (mangled_name != nullptr) {
     cxx_method_decl->addAttr(
         clang::AsmLabelAttr::CreateImplicit(*getASTContext(), mangled_name));
   }
@@ -9622,7 +9637,7 @@ bool ClangASTContext::DumpTypeValue(
       break;
     }
   }
-  return 0;
+  return false;
 }
 
 void ClangASTContext::DumpSummary(lldb::opaque_compiler_type_t type,
@@ -9861,7 +9876,7 @@ clang::ClassTemplateDecl *ClangASTContext::ParseClassTemplateDecl(
                                    template_basename.c_str(), tag_decl_kind,
                                    template_param_infos);
   }
-  return NULL;
+  return nullptr;
 }
 
 void ClangASTContext::CompleteTagDecl(void *baton, clang::TagDecl *decl) {

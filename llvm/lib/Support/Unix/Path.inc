@@ -132,8 +132,6 @@ test_dir(char ret[PATH_MAX], const char *dir, const char *bin)
 static char *
 getprogpath(char ret[PATH_MAX], const char *bin)
 {
-  char *pv, *s, *t;
-
   /* First approach: absolute path. */
   if (bin[0] == '/') {
     if (test_dir(ret, "/", bin) == 0)
@@ -152,18 +150,21 @@ getprogpath(char ret[PATH_MAX], const char *bin)
   }
 
   /* Third approach: $PATH */
+  char *pv;
   if ((pv = getenv("PATH")) == nullptr)
     return nullptr;
-  s = pv = strdup(pv);
-  if (!pv)
+  char *s = strdup(pv);
+  if (!s)
     return nullptr;
-  while ((t = strsep(&s, ":")) != nullptr) {
+  char *state;
+  for (char *t = strtok_r(s, ":", &state); t != nullptr;
+       t = strtok_r(nullptr, ":", &state)) {
     if (test_dir(ret, t, bin) == 0) {
-      free(pv);
+      free(s);
       return ret;
     }
   }
-  free(pv);
+  free(s);
   return nullptr;
 }
 #endif // __FreeBSD__ || __NetBSD__ || __FreeBSD_kernel__
@@ -422,6 +423,9 @@ static bool is_local_impl(struct STATVFS &Vfs) {
   return false;
 #elif defined(__Fuchsia__)
   // Fuchsia doesn't yet support remote filesystem mounts.
+  return true;
+#elif defined(__EMSCRIPTEN__)
+  // Emscripten doesn't currently support remote filesystem mounts.
   return true;
 #elif defined(__HAIKU__)
   // Haiku doesn't expose this information.
@@ -690,9 +694,21 @@ std::error_code status(int FD, file_status &Result) {
   return fillStatus(StatRet, Status, Result);
 }
 
-std::error_code setPermissions(const Twine &Path, perms Permissions) {
+unsigned getUmask() {
+  // Chose arbitary new mask and reset the umask to the old mask.
+  // umask(2) never fails so ignore the return of the second call.
+  unsigned Mask = ::umask(0);
+  (void) ::umask(Mask);
+  return Mask;
+}
+
+std::error_code setPermissions(const Twine &Path, perms Permissions,
+                               bool RespectUmask) {
   SmallString<128> PathStorage;
   StringRef P = Path.toNullTerminatedStringRef(PathStorage);
+
+  if (RespectUmask)
+    Permissions = static_cast<perms>(Permissions & ~getUmask());
 
   if (::chmod(P.begin(), Permissions))
     return std::error_code(errno, std::generic_category());

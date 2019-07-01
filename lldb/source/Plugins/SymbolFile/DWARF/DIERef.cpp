@@ -7,22 +7,12 @@
 //===----------------------------------------------------------------------===//
 
 #include "DIERef.h"
-#include "DWARFUnit.h"
-#include "DWARFDebugInfo.h"
-#include "DWARFFormValue.h"
-#include "SymbolFileDWARF.h"
-#include "SymbolFileDWARFDebugMap.h"
+#include "llvm/Support/Format.h"
 
-DIERef::DIERef(const DWARFFormValue &form_value)
-    : cu_offset(DW_INVALID_OFFSET), die_offset(DW_INVALID_OFFSET) {
-  if (form_value.IsValid()) {
-    const DWARFUnit *dwarf_cu = form_value.GetCompileUnit();
-    if (dwarf_cu) {
-      if (dwarf_cu->GetBaseObjOffset() != DW_INVALID_OFFSET)
-        cu_offset = dwarf_cu->GetBaseObjOffset();
-      else
-        cu_offset = dwarf_cu->GetOffset();
-    }
-    die_offset = form_value.Reference();
-  }
+void llvm::format_provider<DIERef>::format(const DIERef &ref, raw_ostream &OS,
+                                           StringRef Style) {
+  if (ref.dwo_num())
+    OS << format_hex_no_prefix(*ref.dwo_num(), 8) << "/";
+  OS << (ref.section() == DIERef::DebugInfo ? "INFO" : "TYPE");
+  OS << "/" << format_hex_no_prefix(ref.die_offset(), 8);
 }

@@ -26,6 +26,7 @@
 #include "R600MachineScheduler.h"
 #include "SIMachineFunctionInfo.h"
 #include "SIMachineScheduler.h"
+#include "TargetInfo/AMDGPUTargetInfo.h"
 #include "llvm/CodeGen/GlobalISel/IRTranslator.h"
 #include "llvm/CodeGen/GlobalISel/InstructionSelect.h"
 #include "llvm/CodeGen/GlobalISel/Legalizer.h"
@@ -216,6 +217,8 @@ extern "C" void LLVMInitializeAMDGPUTarget() {
   initializeAMDGPUOpenCLEnqueuedBlockLoweringPass(*PR);
   initializeAMDGPUPromoteAllocaPass(*PR);
   initializeAMDGPUCodeGenPreparePass(*PR);
+  initializeAMDGPUPropagateAttributesEarlyPass(*PR);
+  initializeAMDGPUPropagateAttributesLatePass(*PR);
   initializeAMDGPURewriteOutArgumentsPass(*PR);
   initializeAMDGPUUnifyMetadataPass(*PR);
   initializeSIAnnotateControlFlowPass(*PR);
@@ -401,13 +404,14 @@ void AMDGPUTargetMachine::adjustPassManager(PassManagerBuilder &Builder) {
 
   Builder.addExtension(
     PassManagerBuilder::EP_ModuleOptimizerEarly,
-    [Internalize, EarlyInline, AMDGPUAA](const PassManagerBuilder &,
-                                         legacy::PassManagerBase &PM) {
+    [Internalize, EarlyInline, AMDGPUAA, this](const PassManagerBuilder &,
+                                               legacy::PassManagerBase &PM) {
       if (AMDGPUAA) {
         PM.add(createAMDGPUAAWrapperPass());
         PM.add(createAMDGPUExternalAAWrapperPass());
       }
       PM.add(createAMDGPUUnifyMetadataPass());
+      PM.add(createAMDGPUPropagateAttributesLatePass(this));
       if (Internalize) {
         PM.add(createInternalizePass(mustPreserveGV));
         PM.add(createGlobalDCEPass());
@@ -419,15 +423,16 @@ void AMDGPUTargetMachine::adjustPassManager(PassManagerBuilder &Builder) {
   const auto &Opt = Options;
   Builder.addExtension(
     PassManagerBuilder::EP_EarlyAsPossible,
-    [AMDGPUAA, LibCallSimplify, &Opt](const PassManagerBuilder &,
-                                      legacy::PassManagerBase &PM) {
+    [AMDGPUAA, LibCallSimplify, &Opt, this](const PassManagerBuilder &,
+                                            legacy::PassManagerBase &PM) {
       if (AMDGPUAA) {
         PM.add(createAMDGPUAAWrapperPass());
         PM.add(createAMDGPUExternalAAWrapperPass());
       }
+      PM.add(llvm::createAMDGPUPropagateAttributesEarlyPass(this));
       PM.add(llvm::createAMDGPUUseNativeCallsPass());
       if (LibCallSimplify)
-        PM.add(llvm::createAMDGPUSimplifyLibCallsPass(Opt));
+        PM.add(llvm::createAMDGPUSimplifyLibCallsPass(Opt, this));
   });
 
   Builder.addExtension(
@@ -653,11 +658,15 @@ void AMDGPUPassConfig::addIRPasses() {
   disablePass(&FuncletLayoutID);
   disablePass(&PatchableFunctionID);
 
-  addPass(createAtomicExpandPass());
-
   // This must occur before inlining, as the inliner will not look through
   // bitcast calls.
   addPass(createAMDGPUFixFunctionBitcastsPass());
+
+  // A call to propagate attributes pass in the backend in case opt was not run.
+  addPass(createAMDGPUPropagateAttributesEarlyPass(&TM));
+
+  addPass(createAtomicExpandPass());
+
 
   addPass(createAMDGPULowerIntrinsicsPass());
 
@@ -743,7 +752,8 @@ bool AMDGPUPassConfig::addPreISel() {
 }
 
 bool AMDGPUPassConfig::addInstSelector() {
-  addPass(createAMDGPUISelDag(&getAMDGPUTargetMachine(), getOptLevel()));
+  // Defer the verifier until FinalizeISel.
+  addPass(createAMDGPUISelDag(&getAMDGPUTargetMachine(), getOptLevel()), false);
   return false;
 }
 

@@ -40,6 +40,10 @@ STATISTIC(
 STATISTIC(NumGetCTUSuccess,
           "The # of getCTUDefinition successfully returned the "
           "requested function's body");
+STATISTIC(NumUnsupportedNodeFound, "The # of imports when the ASTImporter "
+                                   "encountered an unsupported AST Node");
+STATISTIC(NumNameConflicts, "The # of imports when the ASTImporter "
+                            "encountered an ODR error");
 STATISTIC(NumTripleMismatch, "The # of triple mismatches");
 STATISTIC(NumLangMismatch, "The # of language mismatches");
 STATISTIC(NumLangDialectMismatch, "The # of language dialect mismatches");
@@ -398,16 +402,16 @@ CrossTranslationUnitContext::importDefinitionImpl(const T *D) {
   assert(hasBodyOrInit(D) && "Decls to be imported should have body or init.");
 
   ASTImporter &Importer = getOrCreateASTImporter(D->getASTContext());
-  auto ToDeclOrError = Importer.Import_New(D);
+  auto ToDeclOrError = Importer.Import(D);
   if (!ToDeclOrError) {
     handleAllErrors(ToDeclOrError.takeError(),
                     [&](const ImportError &IE) {
                       switch (IE.Error) {
                       case ImportError::NameConflict:
-                        // FIXME: Add statistic.
+                        ++NumNameConflicts;
                          break;
                       case ImportError::UnsupportedConstruct:
-                        // FIXME: Add statistic.
+                        ++NumUnsupportedNodeFound;
                         break;
                       case ImportError::Unknown:
                         llvm_unreachable("Unknown import error happened.");
