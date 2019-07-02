@@ -45,10 +45,16 @@ include_directories(
   ${LIBOMP_SRC_DIR}/i18n
   ${LIBOMP_INC_DIR}
   ${LIBOMP_SRC_DIR}/thirdparty/ittnotify
+  ${LIBOMP_SRC_DIR}/thirdparty/sicm
+  ${LIBOMP_SRC_DIR}/thirdparty/memkind
 )
 if(${LIBOMP_USE_HWLOC})
   include_directories(${LIBOMP_HWLOC_INSTALL_DIR}/include)
 endif()
+if(${LIBOMP_USE_SICM})
+  include_directories(${LIBOMP_SICM_PATH}/include)
+endif()
+
 
 # Getting correct source files to build library
 set(LIBOMP_CFILES)
@@ -94,6 +100,13 @@ else()
     libomp_append(LIBOMP_ASMFILES z_Linux_asm.S) # Unix assembly file
   endif()
   libomp_append(LIBOMP_CFILES thirdparty/ittnotify/ittnotify_static.c LIBOMP_USE_ITT_NOTIFY)
+  if(${LIBOMP_USE_SICM})
+    libomp_append(LIBOMP_CFILES thirdparty/sicm/kmp_sicm.cpp)
+  else()
+    libomp_append(LIBOMP_CFILES thirdparty/sicm/kmp_no_sicm.cpp)
+  endif()
+  libomp_append(LIBOMP_CFILES thirdparty/sicm/kmp_sicm.cpp)
+  libomp_append(LIBOMP_CFILES thirdparty/memkind/kmp_memkind.cpp)
   libomp_append(LIBOMP_CXXFILES kmp_debugger.cpp LIBOMP_USE_DEBUGGER)
   libomp_append(LIBOMP_CXXFILES kmp_stats.cpp LIBOMP_STATS)
   libomp_append(LIBOMP_CXXFILES kmp_stats_timing.cpp LIBOMP_STATS)

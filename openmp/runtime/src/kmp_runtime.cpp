@@ -537,11 +537,13 @@ static void __kmp_print_team_storage_map(const char *header, kmp_team_t *team,
 static void __kmp_init_allocator() {
 #if OMP_50_ENABLED
   __kmp_init_memkind();
+  __kmp_init_sicm();
 #endif
 }
 static void __kmp_fini_allocator() {
 #if OMP_50_ENABLED
   __kmp_fini_memkind();
+  __kmp_fini_sicm();
 #endif
 }
 
