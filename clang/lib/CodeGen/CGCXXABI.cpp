@@ -13,6 +13,7 @@
 
 #include "CGCXXABI.h"
 #include "CGCleanup.h"
+#include "clang/AST/Attr.h"
 
 using namespace clang;
 using namespace CodeGen;
@@ -46,8 +47,8 @@ CGCallee CGCXXABI::EmitLoadOfMemberFunctionPointer(
   ThisPtrForCall = This.getPointer();
   const FunctionProtoType *FPT =
     MPT->getPointeeType()->getAs<FunctionProtoType>();
-  const CXXRecordDecl *RD =
-    cast<CXXRecordDecl>(MPT->getClass()->getAs<RecordType>()->getDecl());
+  const auto *RD =
+      cast<CXXRecordDecl>(MPT->getClass()->castAs<RecordType>()->getDecl());
   llvm::FunctionType *FTy = CGM.getTypes().GetFunctionType(
       CGM.getTypes().arrangeCXXMethodType(RD, FPT, /*FD=*/nullptr));
   llvm::Constant *FnPtr = llvm::Constant::getNullValue(FTy->getPointerTo());
@@ -291,7 +292,7 @@ llvm::GlobalValue::LinkageTypes CGCXXABI::getCXXDestructorLinkage(
     GVALinkage Linkage, const CXXDestructorDecl *Dtor, CXXDtorType DT) const {
   // Delegate back to CGM by default.
   return CGM.getLLVMLinkageForDeclarator(Dtor, Linkage,
-                                         /*isConstantVariable=*/false);
+                                         /*IsConstantVariable=*/false);
 }
 
 bool CGCXXABI::NeedsVTTParameter(GlobalDecl GD) {

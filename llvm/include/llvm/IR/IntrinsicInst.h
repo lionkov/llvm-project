@@ -25,6 +25,7 @@
 
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
+#include "llvm/IR/FPEnv.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/Instructions.h"
@@ -208,56 +209,28 @@ namespace llvm {
   /// This is the common base class for constrained floating point intrinsics.
   class ConstrainedFPIntrinsic : public IntrinsicInst {
   public:
-    enum RoundingMode {
-      rmInvalid,
-      rmDynamic,
-      rmToNearest,
-      rmDownward,
-      rmUpward,
-      rmTowardZero
-    };
-
-    enum ExceptionBehavior {
-      ebInvalid,
-      ebIgnore,
-      ebMayTrap,
-      ebStrict
-    };
-
     bool isUnaryOp() const;
     bool isTernaryOp() const;
-    RoundingMode getRoundingMode() const;
-    ExceptionBehavior getExceptionBehavior() const;
+    Optional<fp::RoundingMode> getRoundingMode() const;
+    Optional<fp::ExceptionBehavior> getExceptionBehavior() const;
+
+    // Methods for support type inquiry through isa, cast, and dyn_cast:
+    static bool classof(const IntrinsicInst *I);
+    static bool classof(const Value *V) {
+      return isa<IntrinsicInst>(V) && classof(cast<IntrinsicInst>(V));
+    }
+  };
+
+  /// Constrained floating point compare intrinsics.
+  class ConstrainedFPCmpIntrinsic : public ConstrainedFPIntrinsic {
+  public:
+    FCmpInst::Predicate getPredicate() const;
 
     // Methods for support type inquiry through isa, cast, and dyn_cast:
     static bool classof(const IntrinsicInst *I) {
       switch (I->getIntrinsicID()) {
-      case Intrinsic::experimental_constrained_fadd:
-      case Intrinsic::experimental_constrained_fsub:
-      case Intrinsic::experimental_constrained_fmul:
-      case Intrinsic::experimental_constrained_fdiv:
-      case Intrinsic::experimental_constrained_frem:
-      case Intrinsic::experimental_constrained_fma:
-      case Intrinsic::experimental_constrained_fptrunc:
-      case Intrinsic::experimental_constrained_fpext:
-      case Intrinsic::experimental_constrained_sqrt:
-      case Intrinsic::experimental_constrained_pow:
-      case Intrinsic::experimental_constrained_powi:
-      case Intrinsic::experimental_constrained_sin:
-      case Intrinsic::experimental_constrained_cos:
-      case Intrinsic::experimental_constrained_exp:
-      case Intrinsic::experimental_constrained_exp2:
-      case Intrinsic::experimental_constrained_log:
-      case Intrinsic::experimental_constrained_log10:
-      case Intrinsic::experimental_constrained_log2:
-      case Intrinsic::experimental_constrained_rint:
-      case Intrinsic::experimental_constrained_nearbyint:
-      case Intrinsic::experimental_constrained_maxnum:
-      case Intrinsic::experimental_constrained_minnum:
-      case Intrinsic::experimental_constrained_ceil:
-      case Intrinsic::experimental_constrained_floor:
-      case Intrinsic::experimental_constrained_round:
-      case Intrinsic::experimental_constrained_trunc:
+      case Intrinsic::experimental_constrained_fcmp:
+      case Intrinsic::experimental_constrained_fcmps:
         return true;
       default: return false;
       }
@@ -384,11 +357,11 @@ namespace llvm {
       setArgOperand(ARG_DEST, Ptr);
     }
 
-    void setDestAlignment(unsigned Align) {
+    void setDestAlignment(unsigned Alignment) {
       removeParamAttr(ARG_DEST, Attribute::Alignment);
-      if (Align > 0)
-        addParamAttr(ARG_DEST,
-                     Attribute::getWithAlignment(getContext(), Align));
+      if (Alignment > 0)
+        addParamAttr(ARG_DEST, Attribute::getWithAlignment(getContext(),
+                                                           Align(Alignment)));
     }
 
     void setLength(Value *L) {
@@ -433,11 +406,12 @@ namespace llvm {
       BaseCL::setArgOperand(ARG_SOURCE, Ptr);
     }
 
-    void setSourceAlignment(unsigned Align) {
+    void setSourceAlignment(unsigned Alignment) {
       BaseCL::removeParamAttr(ARG_SOURCE, Attribute::Alignment);
-      if (Align > 0)
-        BaseCL::addParamAttr(ARG_SOURCE, Attribute::getWithAlignment(
-                                             BaseCL::getContext(), Align));
+      if (Alignment > 0)
+        BaseCL::addParamAttr(ARG_SOURCE,
+                             Attribute::getWithAlignment(BaseCL::getContext(),
+                                                         Align(Alignment)));
     }
   };
 

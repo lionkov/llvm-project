@@ -4,7 +4,6 @@ Test lldb-vscode setBreakpoints request
 
 from __future__ import print_function
 
-import pprint
 import unittest2
 import vscode
 from lldbsuite.test.decorators import *
@@ -19,7 +18,6 @@ class TestVSCode_setBreakpoints(lldbvscode_testcase.VSCodeTestCaseBase):
     mydir = TestBase.compute_mydir(__file__)
 
     @skipIfWindows
-    @skipIfDarwin # Skip this test for now until we can figure out why tings aren't working on build bots
     @no_debug_info_test
     def test_set_and_clear(self):
         '''Tests setting and clearing source file and line breakpoints.
@@ -152,7 +150,6 @@ class TestVSCode_setBreakpoints(lldbvscode_testcase.VSCodeTestCaseBase):
                                 "expect breakpoint still verified")
 
     @skipIfWindows
-    @skipIfDarwin # Skip this test for now until we can figure out why tings aren't working on build bots
     @no_debug_info_test
     def test_functionality(self):
         '''Tests hitting breakpoints and the functionality of a single

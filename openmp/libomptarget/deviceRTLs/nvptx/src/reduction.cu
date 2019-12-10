@@ -14,53 +14,8 @@
 #include <complex.h>
 #include <stdio.h>
 
-#include "omptarget-nvptx.h"
-
-// may eventually remove this
-EXTERN
-int32_t __gpu_block_reduce() {
-  bool isSPMDExecutionMode = isSPMDMode();
-  int nt = GetNumberOfOmpThreads(isSPMDExecutionMode);
-  if (nt != blockDim.x)
-    return 0;
-  unsigned tnum = __ACTIVEMASK();
-  if (tnum != (~0x0)) // assume swapSize is 32
-    return 0;
-  return 1;
-}
-
-EXTERN
-int32_t __kmpc_reduce_gpu(kmp_Ident *loc, int32_t global_tid, int32_t num_vars,
-                          size_t reduce_size, void *reduce_data,
-                          void *reduce_array_size, kmp_ReductFctPtr *reductFct,
-                          kmp_CriticalName *lck) {
-  int threadId = GetLogicalThreadIdInBlock(checkSPMDMode(loc));
-  omptarget_nvptx_TaskDescr *currTaskDescr = getMyTopTaskDescriptor(threadId);
-  int numthread;
-  if (currTaskDescr->IsParallelConstruct()) {
-    numthread = GetNumberOfOmpThreads(checkSPMDMode(loc));
-  } else {
-    numthread = GetNumberOfOmpTeams();
-  }
-
-  if (numthread == 1)
-    return 1;
-  if (!__gpu_block_reduce())
-    return 2;
-  if (threadIdx.x == 0)
-    return 1;
-  return 0;
-}
-
-EXTERN
-int32_t __kmpc_reduce_combined(kmp_Ident *loc) {
-  return threadIdx.x == 0 ? 2 : 0;
-}
-
-EXTERN
-int32_t __kmpc_reduce_simd(kmp_Ident *loc) {
-  return (threadIdx.x % 32 == 0) ? 1 : 0;
-}
+#include "common/omptarget.h"
+#include "target_impl.h"
 
 EXTERN
 void __kmpc_nvptx_end_reduce(int32_t global_tid) {}
@@ -69,16 +24,15 @@ EXTERN
 void __kmpc_nvptx_end_reduce_nowait(int32_t global_tid) {}
 
 EXTERN int32_t __kmpc_shuffle_int32(int32_t val, int16_t delta, int16_t size) {
-  return __SHFL_DOWN_SYNC(0xFFFFFFFF, val, delta, size);
+  return __kmpc_impl_shfl_down_sync(__kmpc_impl_all_lanes, val, delta, size);
 }
 
 EXTERN int64_t __kmpc_shuffle_int64(int64_t val, int16_t delta, int16_t size) {
-   int lo, hi;
-   asm volatile("mov.b64 {%0,%1}, %2;" : "=r"(lo), "=r"(hi) : "l"(val));
-   hi = __SHFL_DOWN_SYNC(0xFFFFFFFF, hi, delta, size);
-   lo = __SHFL_DOWN_SYNC(0xFFFFFFFF, lo, delta, size);
-   asm volatile("mov.b64 %0, {%1,%2};" : "=l"(val) : "r"(lo), "r"(hi));
-   return val;
+   uint32_t lo, hi;
+   __kmpc_impl_unpack(val, lo, hi);
+   hi = __kmpc_impl_shfl_down_sync(__kmpc_impl_all_lanes, hi, delta, size);
+   lo = __kmpc_impl_shfl_down_sync(__kmpc_impl_all_lanes, lo, delta, size);
+   return __kmpc_impl_pack(lo, hi);
 }
 
 INLINE static void gpu_regular_warp_reduce(void *reduce_data,
@@ -105,18 +59,16 @@ INLINE static void gpu_irregular_warp_reduce(void *reduce_data,
 
 INLINE static uint32_t
 gpu_irregular_simd_reduce(void *reduce_data, kmp_ShuffleReductFctPtr shflFct) {
-  uint32_t lanemask_lt;
-  uint32_t lanemask_gt;
   uint32_t size, remote_id, physical_lane_id;
   physical_lane_id = GetThreadIdInBlock() % WARPSIZE;
-  asm("mov.u32 %0, %%lanemask_lt;" : "=r"(lanemask_lt));
-  uint32_t Liveness = __ACTIVEMASK();
-  uint32_t logical_lane_id = __popc(Liveness & lanemask_lt) * 2;
-  asm("mov.u32 %0, %%lanemask_gt;" : "=r"(lanemask_gt));
+  __kmpc_impl_lanemask_t lanemask_lt = __kmpc_impl_lanemask_lt();
+  __kmpc_impl_lanemask_t Liveness = __kmpc_impl_activemask();
+  uint32_t logical_lane_id = __kmpc_impl_popc(Liveness & lanemask_lt) * 2;
+  __kmpc_impl_lanemask_t lanemask_gt = __kmpc_impl_lanemask_gt();
   do {
-    Liveness = __ACTIVEMASK();
-    remote_id = __ffs(Liveness & lanemask_gt);
-    size = __popc(Liveness);
+    Liveness = __kmpc_impl_activemask();
+    remote_id = __kmpc_impl_ffs(Liveness & lanemask_gt);
+    size = __kmpc_impl_popc(Liveness);
     logical_lane_id /= 2;
     shflFct(reduce_data, /*LaneId =*/logical_lane_id,
             /*Offset=*/remote_id - 1 - physical_lane_id, /*AlgoVersion=*/2);
@@ -129,8 +81,8 @@ int32_t __kmpc_nvptx_simd_reduce_nowait(int32_t global_tid, int32_t num_vars,
                                         size_t reduce_size, void *reduce_data,
                                         kmp_ShuffleReductFctPtr shflFct,
                                         kmp_InterWarpCopyFctPtr cpyFct) {
-  uint32_t Liveness = __ACTIVEMASK();
-  if (Liveness == 0xffffffff) {
+  __kmpc_impl_lanemask_t Liveness = __kmpc_impl_activemask();
+  if (Liveness == __kmpc_impl_all_lanes) {
     gpu_regular_warp_reduce(reduce_data, shflFct);
     return GetThreadIdInBlock() % WARPSIZE ==
            0; // Result on lane 0 of the simd warp.
@@ -190,12 +142,12 @@ static int32_t nvptx_parallel_reduce_nowait(
   }
   return BlockThreadId == 0;
 #else
-  uint32_t Liveness = __ACTIVEMASK();
-  if (Liveness == 0xffffffff) // Full warp
+  __kmpc_impl_lanemask_t Liveness = __kmpc_impl_activemask();
+  if (Liveness == __kmpc_impl_all_lanes) // Full warp
     gpu_regular_warp_reduce(reduce_data, shflFct);
   else if (!(Liveness & (Liveness + 1))) // Partial warp but contiguous lanes
     gpu_irregular_warp_reduce(reduce_data, shflFct,
-                              /*LaneCount=*/__popc(Liveness),
+                              /*LaneCount=*/__kmpc_impl_popc(Liveness),
                               /*LaneId=*/GetThreadIdInBlock() % WARPSIZE);
   else if (!isRuntimeUninitialized) // Dispersed lanes. Only threads in L2
                                     // parallel region may enter here; return
@@ -281,7 +233,7 @@ static int32_t nvptx_teams_reduce_nowait(int32_t global_tid, int32_t num_vars,
                           : /*Master thread only*/ 1;
   uint32_t TeamId = GetBlockIdInKernel();
   uint32_t NumTeams = GetNumberOfBlocksInKernel();
-  __shared__ volatile bool IsLastTeam;
+  SHARED volatile bool IsLastTeam;
 
   // Team masters of all teams write to the scratchpad.
   if (ThreadId == 0) {
@@ -289,7 +241,7 @@ static int32_t nvptx_teams_reduce_nowait(int32_t global_tid, int32_t num_vars,
     char *scratchpad = GetTeamsReductionScratchpad();
 
     scratchFct(reduce_data, scratchpad, TeamId, NumTeams);
-    __threadfence();
+    __kmpc_impl_threadfence();
 
     // atomicInc increments 'timestamp' and has a range [0, NumTeams-1].
     // It resets 'timestamp' back to 0 once the last team increments
@@ -304,7 +256,7 @@ static int32_t nvptx_teams_reduce_nowait(int32_t global_tid, int32_t num_vars,
   // If we guard this barrier as follows it leads to deadlock, probably
   // because of a compiler bug: if (!IsGenericMode()) __syncthreads();
   uint16_t SyncWarps = (NumThreads + WARPSIZE - 1) / WARPSIZE;
-  named_sync(L1_BARRIER, SyncWarps * WARPSIZE);
+  __kmpc_impl_named_sync(L1_BARRIER, SyncWarps * WARPSIZE);
 
   // If this team is not the last, quit.
   if (/* Volatile read by all threads */ !IsLastTeam)
@@ -365,12 +317,12 @@ static int32_t nvptx_teams_reduce_nowait(int32_t global_tid, int32_t num_vars,
     ldFct(reduce_data, scratchpad, i, NumTeams, /*Load and reduce*/ 1);
 
   // Reduce across warps to the warp master.
-  uint32_t Liveness = __ACTIVEMASK();
-  if (Liveness == 0xffffffff) // Full warp
+  __kmpc_impl_lanemask_t Liveness = __kmpc_impl_activemask();
+  if (Liveness == __kmpc_impl_all_lanes) // Full warp
     gpu_regular_warp_reduce(reduce_data, shflFct);
   else // Partial warp but contiguous lanes
     gpu_irregular_warp_reduce(reduce_data, shflFct,
-                              /*LaneCount=*/__popc(Liveness),
+                              /*LaneCount=*/__kmpc_impl_popc(Liveness),
                               /*LaneId=*/ThreadId % WARPSIZE);
 
   // When we have more than [warpsize] number of threads
@@ -437,7 +389,7 @@ EXTERN int32_t __kmpc_nvptx_teams_reduce_nowait_simple(kmp_Ident *loc,
 EXTERN void
 __kmpc_nvptx_teams_end_reduce_nowait_simple(kmp_Ident *loc, int32_t global_tid,
                                             kmp_CriticalName *crit) {
-  __threadfence_system();
+  __kmpc_impl_threadfence_system();
   (void)atomicExch((uint32_t *)crit, 0);
 }
 
@@ -451,8 +403,8 @@ INLINE static uint32_t roundToWarpsize(uint32_t s) {
   return (s & ~(unsigned)(WARPSIZE - 1));
 }
 
-__device__ static volatile uint32_t IterCnt = 0;
-__device__ static volatile uint32_t Cnt = 0;
+DEVICE static volatile uint32_t IterCnt = 0;
+DEVICE static volatile uint32_t Cnt = 0;
 EXTERN int32_t __kmpc_nvptx_teams_reduce_nowait_v2(
     kmp_Ident *loc, int32_t global_tid, void *global_buffer,
     int32_t num_of_records, void *reduce_data, kmp_ShuffleReductFctPtr shflFct,
@@ -474,8 +426,8 @@ EXTERN int32_t __kmpc_nvptx_teams_reduce_nowait_v2(
                          : /*Master thread only*/ 1;
   uint32_t TeamId = GetBlockIdInKernel();
   uint32_t NumTeams = GetNumberOfBlocksInKernel();
-  __shared__ unsigned Bound;
-  __shared__ unsigned ChunkTeamCount;
+  SHARED unsigned Bound;
+  SHARED unsigned ChunkTeamCount;
 
   // Block progress for teams greater than the current upper
   // limit. We always only allow a number of teams less or equal
@@ -494,7 +446,7 @@ EXTERN int32_t __kmpc_nvptx_teams_reduce_nowait_v2(
       lgcpyFct(global_buffer, ModBockId, reduce_data);
     else
       lgredFct(global_buffer, ModBockId, reduce_data);
-    __threadfence_system();
+    __kmpc_impl_threadfence_system();
 
     // Increment team counter.
     // This counter is incremented by all teams in the current

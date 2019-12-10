@@ -101,23 +101,15 @@ namespace lldb {
         bool
         operator != (lldb::SBTypeSummary &rhs);
 
+#ifdef SWIGPYTHON
         %pythoncode %{
-            __swig_getmethods__["options"] = GetOptions
-            __swig_setmethods__["options"] = SetOptions
-            if _newclass: options = property(GetOptions, SetOptions)
-
-            __swig_getmethods__["is_summary_string"] = IsSummaryString
-            if _newclass: is_summary_string = property(IsSummaryString, None)
-
-            __swig_getmethods__["is_function_name"] = IsFunctionName
-            if _newclass: is_function_name = property(IsFunctionName, None)
-
-            __swig_getmethods__["is_function_name"] = IsFunctionCode
-            if _newclass: is_function_name = property(IsFunctionCode, None)
-
-            __swig_getmethods__["summary_data"] = GetData
-            if _newclass: summary_data = property(GetData, None)
+            options = property(GetOptions, SetOptions)
+            is_summary_string = property(IsSummaryString)
+            is_function_name = property(IsFunctionName)
+            is_function_name = property(IsFunctionCode)
+            summary_data = property(GetData)
         %}
+#endif
 
     };
 

@@ -337,15 +337,15 @@ defm CondStore8Mux  : CondStores<GRX32, nonvolatile_truncstorei8,
 defm CondStore16Mux : CondStores<GRX32, nonvolatile_truncstorei16,
                                  nonvolatile_anyextloadi16, bdxaddr20only>,
                       Requires<[FeatureHighWord]>;
-defm CondStore32Mux : CondStores<GRX32, nonvolatile_store,
-                                 nonvolatile_load, bdxaddr20only>,
+defm CondStore32Mux : CondStores<GRX32, simple_store,
+                                 simple_load, bdxaddr20only>,
                       Requires<[FeatureLoadStoreOnCond2]>;
 defm CondStore8     : CondStores<GR32, nonvolatile_truncstorei8,
                                  nonvolatile_anyextloadi8, bdxaddr20only>;
 defm CondStore16    : CondStores<GR32, nonvolatile_truncstorei16,
                                  nonvolatile_anyextloadi16, bdxaddr20only>;
-defm CondStore32    : CondStores<GR32, nonvolatile_store,
-                                 nonvolatile_load, bdxaddr20only>;
+defm CondStore32    : CondStores<GR32, simple_store,
+                                 simple_load, bdxaddr20only>;
 
 defm : CondStores64<CondStore8, CondStore8Inv, nonvolatile_truncstorei8,
                     nonvolatile_anyextloadi8, bdxaddr20only>;
@@ -353,8 +353,8 @@ defm : CondStores64<CondStore16, CondStore16Inv, nonvolatile_truncstorei16,
                     nonvolatile_anyextloadi16, bdxaddr20only>;
 defm : CondStores64<CondStore32, CondStore32Inv, nonvolatile_truncstorei32,
                     nonvolatile_anyextloadi32, bdxaddr20only>;
-defm CondStore64 : CondStores<GR64, nonvolatile_store,
-                              nonvolatile_load, bdxaddr20only>;
+defm CondStore64 : CondStores<GR64, simple_store,
+                              simple_load, bdxaddr20only>;
 
 //===----------------------------------------------------------------------===//
 // Move instructions
@@ -474,6 +474,11 @@ let mayLoad = 1, mayStore = 1, Defs = [CC] in {
   def MVCLU : SideEffectTernaryMemMemRSY<"mvclu", 0xEB8E, GR128, GR128>;
 }
 
+// Move right.
+let Predicates = [FeatureMiscellaneousExtensions3],
+    mayLoad = 1, mayStore = 1, Uses = [R0L] in
+  def MVCRL : SideEffectBinarySSE<"mvcrl", 0xE50A>;
+
 // String moves.
 let mayLoad = 1, mayStore = 1, Defs = [CC] in
   defm MVST : StringRRE<"mvst", 0xB255, z_stpcpy>;
@@ -481,6 +486,29 @@ let mayLoad = 1, mayStore = 1, Defs = [CC] in
 //===----------------------------------------------------------------------===//
 // Conditional move instructions
 //===----------------------------------------------------------------------===//
+
+let Predicates = [FeatureMiscellaneousExtensions3], Uses = [CC] in {
+  // Select.
+  let isCommutable = 1 in {
+    // Expands to SELR or SELFHR or a branch-and-move sequence,
+    // depending on the choice of registers.
+    def  SELRMux : CondBinaryRRFaPseudo<GRX32, GRX32, GRX32>;
+    defm SELFHR  : CondBinaryRRFaPair<"selfhr", 0xB9C0, GRH32, GRH32, GRH32>;
+    defm SELR    : CondBinaryRRFaPair<"selr",   0xB9F0, GR32, GR32, GR32>;
+    defm SELGR   : CondBinaryRRFaPair<"selgr",  0xB9E3, GR64, GR64, GR64>;
+  }
+
+  // Define AsmParser extended mnemonics for each general condition-code mask.
+  foreach V = [ "E", "NE", "H", "NH", "L", "NL", "HE", "NHE", "LE", "NLE",
+                "Z", "NZ", "P", "NP", "M", "NM", "LH", "NLH", "O", "NO" ] in {
+    def SELRAsm#V   : FixedCondBinaryRRFa<CV<V>, "selr",   0xB9F0,
+                                          GR32, GR32, GR32>;
+    def SELFHRAsm#V : FixedCondBinaryRRFa<CV<V>, "selfhr", 0xB9C0,
+                                          GRH32, GRH32, GRH32>;
+    def SELGRAsm#V  : FixedCondBinaryRRFa<CV<V>, "selgr",  0xB9E3,
+                                          GR64, GR64, GR64>;
+  }
+}
 
 let Predicates = [FeatureLoadStoreOnCond2], Uses = [CC] in {
   // Load immediate on condition.  Matched via DAG pattern and created
@@ -503,8 +531,8 @@ let Predicates = [FeatureLoadStoreOnCond2], Uses = [CC] in {
 
   // Load on condition.  Matched via DAG pattern.
   // Expands to LOC or LOCFH, depending on the choice of register.
-  def LOCMux : CondUnaryRSYPseudo<nonvolatile_load, GRX32, 4>;
-  defm LOCFH : CondUnaryRSYPair<"locfh", 0xEBE0, nonvolatile_load, GRH32, 4>;
+  def LOCMux : CondUnaryRSYPseudo<simple_load, GRX32, 4>;
+  defm LOCFH : CondUnaryRSYPair<"locfh", 0xEBE0, simple_load, GRH32, 4>;
 
   // Store on condition.  Expanded from CondStore* pseudos.
   // Expands to STOC or STOCFH, depending on the choice of register.
@@ -535,8 +563,8 @@ let Predicates = [FeatureLoadStoreOnCond], Uses = [CC] in {
   }
 
   // Load on condition.  Matched via DAG pattern.
-  defm LOC  : CondUnaryRSYPair<"loc",  0xEBF2, nonvolatile_load, GR32, 4>;
-  defm LOCG : CondUnaryRSYPair<"locg", 0xEBE2, nonvolatile_load, GR64, 8>;
+  defm LOC  : CondUnaryRSYPair<"loc",  0xEBF2, simple_load, GR32, 4>;
+  defm LOCG : CondUnaryRSYPair<"locg", 0xEBE2, simple_load, GR64, 8>;
 
   // Store on condition.  Expanded from CondStore* pseudos.
   defm STOC  : CondStoreRSYPair<"stoc",  0xEBF3, GR32, 4>;
@@ -1244,6 +1272,43 @@ defm : RMWIByte<xor, bdaddr12pair, XI>;
 defm : RMWIByte<xor, bdaddr20pair, XIY>;
 
 //===----------------------------------------------------------------------===//
+// Combined logical operations
+//===----------------------------------------------------------------------===//
+
+let Predicates = [FeatureMiscellaneousExtensions3],
+    Defs = [CC] in {
+  // AND with complement.
+  let CCValues = 0xC, CompareZeroCCMask = 0x8 in {
+    def NCRK : BinaryRRFa<"ncrk", 0xB9F5, andc, GR32, GR32, GR32>;
+    def NCGRK : BinaryRRFa<"ncgrk", 0xB9E5, andc, GR64, GR64, GR64>;
+  }
+
+  // OR with complement.
+  let CCValues = 0xC, CompareZeroCCMask = 0x8 in {
+    def OCRK : BinaryRRFa<"ocrk", 0xB975, orc, GR32, GR32, GR32>;
+    def OCGRK : BinaryRRFa<"ocgrk", 0xB965, orc, GR64, GR64, GR64>;
+  }
+
+  // NAND.
+  let isCommutable = 1, CCValues = 0xC, CompareZeroCCMask = 0x8 in {
+    def NNRK : BinaryRRFa<"nnrk", 0xB974, nand, GR32, GR32, GR32>;
+    def NNGRK : BinaryRRFa<"nngrk", 0xB964, nand, GR64, GR64, GR64>;
+  }
+
+  // NOR.
+  let isCommutable = 1, CCValues = 0xC, CompareZeroCCMask = 0x8 in {
+    def NORK : BinaryRRFa<"nork", 0xB976, nor, GR32, GR32, GR32>;
+    def NOGRK : BinaryRRFa<"nogrk", 0xB966, nor, GR64, GR64, GR64>;
+  }
+
+  // NXOR.
+  let isCommutable = 1, CCValues = 0xC, CompareZeroCCMask = 0x8 in {
+    def NXRK : BinaryRRFa<"nxrk", 0xB977, nxor, GR32, GR32, GR32>;
+    def NXGRK : BinaryRRFa<"nxgrk", 0xB967, nxor, GR64, GR64, GR64>;
+  }
+}
+
+//===----------------------------------------------------------------------===//
 // Multiplication
 //===----------------------------------------------------------------------===//
 
@@ -1837,6 +1902,9 @@ let mayLoad = 1, mayStore = 1, Uses = [R0L, R1D], Defs = [CC] in {
   let Predicates = [FeatureMessageSecurityAssist8] in
     def KMA : SideEffectTernaryMemMemMemRRFb<"kma", 0xB929,
                                               GR128, GR128, GR128>;
+
+  let Predicates = [FeatureMessageSecurityAssist9] in
+    def KDSA : SideEffectBinaryMemRRE<"kdsa", 0xB93A, GR64, GR128>;
 }
 
 //===----------------------------------------------------------------------===//
@@ -2001,7 +2069,7 @@ let Predicates = [FeatureProcessorAssist] in {
     def PPA : SideEffectTernaryRRFc<"ppa", 0xB2E8, GR64, GR64, imm32zx4>;
   def : Pat<(int_s390_ppa_txassist GR32:$src),
             (PPA (INSERT_SUBREG (i64 (IMPLICIT_DEF)), GR32:$src, subreg_l32),
-                 0, 1)>;
+                 zero_reg, 1)>;
 }
 
 //===----------------------------------------------------------------------===//
@@ -2014,10 +2082,15 @@ let Predicates = [FeatureProcessorAssist] in {
 // cleared.  We only use the first result here.
 let Defs = [CC] in
   def FLOGR : UnaryRRE<"flogr", 0xB983, null_frag, GR128, GR64>;
-def : Pat<(ctlz GR64:$src),
+def : Pat<(i64 (ctlz GR64:$src)),
           (EXTRACT_SUBREG (FLOGR GR64:$src), subreg_h64)>;
 
-// Population count.  Counts bits set per byte.
+// Population count.  Counts bits set per byte or doubleword.
+let Predicates = [FeatureMiscellaneousExtensions3] in {
+  let Defs = [CC] in
+    def POPCNTOpt : BinaryRRFc<"popcnt", 0xB9E1, GR64, GR64>;
+  def : Pat<(ctpop GR64:$src), (POPCNTOpt GR64:$src, 8)>;
+}
 let Predicates = [FeaturePopulationCount], Defs = [CC] in
   def POPCNT : UnaryRRE<"popcnt", 0xB9E1, z_popcnt, GR64, GR64>;
 
@@ -2047,6 +2120,17 @@ let mayLoad = 1, Defs = [CC] in
 // Compression call.
 let mayLoad = 1, mayStore = 1, Defs = [CC, R1D], Uses = [R0L, R1D] in
   def CMPSC : SideEffectBinaryMemMemRRE<"cmpsc", 0xB263, GR128, GR128>;
+
+// Sort lists.
+let Predicates = [FeatureEnhancedSort],
+    mayLoad = 1, mayStore = 1, Defs = [CC], Uses = [R0L, R1D] in
+  def SORTL : SideEffectBinaryMemMemRRE<"sortl", 0xB938, GR128, GR128>;
+
+// Deflate conversion call.
+let Predicates = [FeatureDeflateConversion],
+    mayLoad = 1, mayStore = 1, Defs = [CC], Uses = [R0L, R1D] in
+  def DFLTCC : SideEffectTernaryMemMemRRFa<"dfltcc", 0xB939,
+                                           GR128, GR128, GR64>;
 
 // Execute.
 let hasSideEffects = 1 in {

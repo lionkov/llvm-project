@@ -46,10 +46,18 @@ class AMDGPUTTIImpl final : public BasicTTIImplBase<AMDGPUTTIImpl> {
 
   Triple TargetTriple;
 
+  const GCNSubtarget *ST;
+  const TargetLoweringBase *TLI;
+
+  const TargetSubtargetInfo *getST() const { return ST; }
+  const TargetLoweringBase *getTLI() const { return TLI; }
+
 public:
   explicit AMDGPUTTIImpl(const AMDGPUTargetMachine *TM, const Function &F)
-    : BaseT(TM, F.getParent()->getDataLayout()),
-      TargetTriple(TM->getTargetTriple()) {}
+      : BaseT(TM, F.getParent()->getDataLayout()),
+        TargetTriple(TM->getTargetTriple()),
+        ST(static_cast<const GCNSubtarget *>(TM->getSubtargetImpl(F))),
+        TLI(ST->getTargetLowering()) {}
 
   void getUnrollingPreferences(Loop *L, ScalarEvolution &SE,
                                TTI::UnrollingPreferences &UP);
@@ -65,6 +73,7 @@ class GCNTTIImpl final : public BasicTTIImplBase<GCNTTIImpl> {
   const AMDGPUTargetLowering *TLI;
   AMDGPUTTIImpl CommonTTI;
   bool IsGraphicsShader;
+  bool HasFP32Denormals;
 
   const FeatureBitset InlineFeatureIgnoreList = {
     // Codegen control options which don't matter.
@@ -123,7 +132,8 @@ public:
       ST(static_cast<const GCNSubtarget*>(TM->getSubtargetImpl(F))),
       TLI(ST->getTargetLowering()),
       CommonTTI(TM, F),
-      IsGraphicsShader(AMDGPU::isShader(F.getCallingConv())) {}
+      IsGraphicsShader(AMDGPU::isShader(F.getCallingConv())),
+      HasFP32Denormals(ST->hasFP32Denormals(F)) { }
 
   bool hasBranchDivergence() { return true; }
 
@@ -162,12 +172,13 @@ public:
   bool getTgtMemIntrinsic(IntrinsicInst *Inst, MemIntrinsicInfo &Info) const;
 
   int getArithmeticInstrCost(
-    unsigned Opcode, Type *Ty,
-    TTI::OperandValueKind Opd1Info = TTI::OK_AnyValue,
-    TTI::OperandValueKind Opd2Info = TTI::OK_AnyValue,
-    TTI::OperandValueProperties Opd1PropInfo = TTI::OP_None,
-    TTI::OperandValueProperties Opd2PropInfo = TTI::OP_None,
-    ArrayRef<const Value *> Args = ArrayRef<const Value *>());
+      unsigned Opcode, Type *Ty,
+      TTI::OperandValueKind Opd1Info = TTI::OK_AnyValue,
+      TTI::OperandValueKind Opd2Info = TTI::OK_AnyValue,
+      TTI::OperandValueProperties Opd1PropInfo = TTI::OP_None,
+      TTI::OperandValueProperties Opd2PropInfo = TTI::OP_None,
+      ArrayRef<const Value *> Args = ArrayRef<const Value *>(),
+      const Instruction *CxtI = nullptr);
 
   unsigned getCFInstrCost(unsigned Opcode);
 
@@ -183,6 +194,11 @@ public:
     return AMDGPUAS::FLAT_ADDRESS;
   }
 
+  bool collectFlatAddressOperands(SmallVectorImpl<int> &OpIndexes,
+                                  Intrinsic::ID IID) const;
+  bool rewriteIntrinsicWithAddressSpace(IntrinsicInst *II,
+                                        Value *OldV, Value *NewV) const;
+
   unsigned getVectorSplitCost() { return 0; }
 
   unsigned getShuffleCost(TTI::ShuffleKind Kind, Type *Tp, int Index,
@@ -191,7 +207,9 @@ public:
   bool areInlineCompatible(const Function *Caller,
                            const Function *Callee) const;
 
-  unsigned getInliningThresholdMultiplier() { return 9; }
+  unsigned getInliningThresholdMultiplier() { return 11; }
+
+  int getInlinerVectorBonusPercent() { return 0; }
 
   int getArithmeticReductionCost(unsigned Opcode,
                                  Type *Ty,
@@ -199,6 +217,7 @@ public:
   int getMinMaxReductionCost(Type *Ty, Type *CondTy,
                              bool IsPairwiseForm,
                              bool IsUnsigned);
+  unsigned getUserCost(const User *U, ArrayRef<const Value *> Operands);
 };
 
 class R600TTIImpl final : public BasicTTIImplBase<R600TTIImpl> {

@@ -115,7 +115,7 @@ class WebAssemblyFastISel final : public FastISel {
 private:
   // Utility helper routines
   MVT::SimpleValueType getSimpleType(Type *Ty) {
-    EVT VT = TLI.getValueType(DL, Ty, /*HandleUnknown=*/true);
+    EVT VT = TLI.getValueType(DL, Ty, /*AllowUnknown=*/true);
     return VT.isSimple() ? VT.getSimpleVT().SimpleTy
                          : MVT::INVALID_SIMPLE_VALUE_TYPE;
   }
@@ -129,7 +129,7 @@ private:
     case MVT::i64:
     case MVT::f32:
     case MVT::f64:
-    case MVT::ExceptRef:
+    case MVT::exnref:
       return VT;
     case MVT::f16:
       return MVT::f32;
@@ -232,6 +232,8 @@ bool WebAssemblyFastISel::computeAddress(const Value *Obj, Address &Addr) {
     if (TLI.isPositionIndependent())
       return false;
     if (Addr.getGlobalValue())
+      return false;
+    if (GV->isThreadLocal())
       return false;
     Addr.setGlobalValue(GV);
     return true;
@@ -614,6 +616,8 @@ unsigned WebAssemblyFastISel::fastMaterializeConstant(const Constant *C) {
   if (const GlobalValue *GV = dyn_cast<GlobalValue>(C)) {
     if (TLI.isPositionIndependent())
       return 0;
+    if (GV->isThreadLocal())
+      return 0;
     unsigned ResultReg =
         createResultReg(Subtarget->hasAddr64() ? &WebAssembly::I64RegClass
                                                : &WebAssembly::I32RegClass);
@@ -698,9 +702,9 @@ bool WebAssemblyFastISel::fastLowerArguments() {
       Opc = WebAssembly::ARGUMENT_v2f64;
       RC = &WebAssembly::V128RegClass;
       break;
-    case MVT::ExceptRef:
-      Opc = WebAssembly::ARGUMENT_ExceptRef;
-      RC = &WebAssembly::EXCEPT_REFRegClass;
+    case MVT::exnref:
+      Opc = WebAssembly::ARGUMENT_exnref;
+      RC = &WebAssembly::EXNREFRegClass;
       break;
     default:
       return false;
@@ -815,10 +819,10 @@ bool WebAssemblyFastISel::selectCall(const Instruction *I) {
                      : WebAssembly::PCALL_INDIRECT_v2f64;
       ResultReg = createResultReg(&WebAssembly::V128RegClass);
       break;
-    case MVT::ExceptRef:
-      Opc = IsDirect ? WebAssembly::CALL_ExceptRef
-                     : WebAssembly::PCALL_INDIRECT_ExceptRef;
-      ResultReg = createResultReg(&WebAssembly::EXCEPT_REFRegClass);
+    case MVT::exnref:
+      Opc = IsDirect ? WebAssembly::CALL_exnref
+                     : WebAssembly::PCALL_INDIRECT_exnref;
+      ResultReg = createResultReg(&WebAssembly::EXNREFRegClass);
       break;
     default:
       return false;
@@ -921,9 +925,9 @@ bool WebAssemblyFastISel::selectSelect(const Instruction *I) {
     Opc = WebAssembly::SELECT_F64;
     RC = &WebAssembly::F64RegClass;
     break;
-  case MVT::ExceptRef:
-    Opc = WebAssembly::SELECT_EXCEPT_REF;
-    RC = &WebAssembly::EXCEPT_REFRegClass;
+  case MVT::exnref:
+    Opc = WebAssembly::SELECT_EXNREF;
+    RC = &WebAssembly::EXNREFRegClass;
     break;
   default:
     return false;
@@ -1137,14 +1141,14 @@ bool WebAssemblyFastISel::selectBitCast(const Instruction *I) {
     return true;
   }
 
-  unsigned Reg = fastEmit_ISD_BITCAST_r(VT.getSimpleVT(), RetVT.getSimpleVT(),
+  Register Reg = fastEmit_ISD_BITCAST_r(VT.getSimpleVT(), RetVT.getSimpleVT(),
                                         In, I->getOperand(0)->hasOneUse());
   if (!Reg)
     return false;
   MachineBasicBlock::iterator Iter = FuncInfo.InsertPt;
   --Iter;
   assert(Iter->isBitcast());
-  Iter->setPhysRegsDeadExcept(ArrayRef<unsigned>(), TRI);
+  Iter->setPhysRegsDeadExcept(ArrayRef<Register>(), TRI);
   updateValueMap(I, Reg);
   return true;
 }
@@ -1298,51 +1302,33 @@ bool WebAssemblyFastISel::selectRet(const Instruction *I) {
 
   if (Ret->getNumOperands() == 0) {
     BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
-            TII.get(WebAssembly::RETURN_VOID));
+            TII.get(WebAssembly::RETURN));
     return true;
   }
+
+  // TODO: support multiple return in FastISel
+  if (Ret->getNumOperands() > 1)
+    return false;
 
   Value *RV = Ret->getOperand(0);
   if (!Subtarget->hasSIMD128() && RV->getType()->isVectorTy())
     return false;
 
-  unsigned Opc;
   switch (getSimpleType(RV->getType())) {
   case MVT::i1:
   case MVT::i8:
   case MVT::i16:
   case MVT::i32:
-    Opc = WebAssembly::RETURN_I32;
-    break;
   case MVT::i64:
-    Opc = WebAssembly::RETURN_I64;
-    break;
   case MVT::f32:
-    Opc = WebAssembly::RETURN_F32;
-    break;
   case MVT::f64:
-    Opc = WebAssembly::RETURN_F64;
-    break;
   case MVT::v16i8:
-    Opc = WebAssembly::RETURN_v16i8;
-    break;
   case MVT::v8i16:
-    Opc = WebAssembly::RETURN_v8i16;
-    break;
   case MVT::v4i32:
-    Opc = WebAssembly::RETURN_v4i32;
-    break;
   case MVT::v2i64:
-    Opc = WebAssembly::RETURN_v2i64;
-    break;
   case MVT::v4f32:
-    Opc = WebAssembly::RETURN_v4f32;
-    break;
   case MVT::v2f64:
-    Opc = WebAssembly::RETURN_v2f64;
-    break;
-  case MVT::ExceptRef:
-    Opc = WebAssembly::RETURN_EXCEPT_REF;
+  case MVT::exnref:
     break;
   default:
     return false;
@@ -1359,7 +1345,9 @@ bool WebAssemblyFastISel::selectRet(const Instruction *I) {
   if (Reg == 0)
     return false;
 
-  BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc, TII.get(Opc)).addReg(Reg);
+  BuildMI(*FuncInfo.MBB, FuncInfo.InsertPt, DbgLoc,
+          TII.get(WebAssembly::RETURN))
+      .addReg(Reg);
   return true;
 }
 

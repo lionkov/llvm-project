@@ -49,7 +49,7 @@ GlobalVariable *IRBuilderBase::CreateGlobalString(StringRef Str,
                                 nullptr, GlobalVariable::NotThreadLocal,
                                 AddressSpace);
   GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
-  GV->setAlignment(1);
+  GV->setAlignment(Align::None());
   return GV;
 }
 
@@ -96,10 +96,10 @@ static InvokeInst *createInvokeHelper(Function *Invokee, BasicBlock *NormalDest,
   return II;
 }
 
-CallInst *IRBuilderBase::
-CreateMemSet(Value *Ptr, Value *Val, Value *Size, unsigned Align,
-             bool isVolatile, MDNode *TBAATag, MDNode *ScopeTag,
-             MDNode *NoAliasTag) {
+CallInst *IRBuilderBase::CreateMemSet(Value *Ptr, Value *Val, Value *Size,
+                                      MaybeAlign Align, bool isVolatile,
+                                      MDNode *TBAATag, MDNode *ScopeTag,
+                                      MDNode *NoAliasTag) {
   Ptr = getCastedInt8PtrValue(Ptr);
   Value *Ops[] = {Ptr, Val, Size, getInt1(isVolatile)};
   Type *Tys[] = { Ptr->getType(), Size->getType() };
@@ -108,8 +108,8 @@ CreateMemSet(Value *Ptr, Value *Val, Value *Size, unsigned Align,
 
   CallInst *CI = createCallHelper(TheFn, Ops, this);
 
-  if (Align > 0)
-    cast<MemSetInst>(CI)->setDestAlignment(Align);
+  if (Align)
+    cast<MemSetInst>(CI)->setDestAlignment(Align->value());
 
   // Set the TBAA info if present.
   if (TBAATag)
@@ -289,8 +289,10 @@ CallInst *IRBuilderBase::CreateElementUnorderedAtomicMemMove(
   CallInst *CI = createCallHelper(TheFn, Ops, this);
 
   // Set the alignment of the pointer args.
-  CI->addParamAttr(0, Attribute::getWithAlignment(CI->getContext(), DstAlign));
-  CI->addParamAttr(1, Attribute::getWithAlignment(CI->getContext(), SrcAlign));
+  CI->addParamAttr(
+      0, Attribute::getWithAlignment(CI->getContext(), Align(DstAlign)));
+  CI->addParamAttr(
+      1, Attribute::getWithAlignment(CI->getContext(), Align(SrcAlign)));
 
   // Set the TBAA info if present.
   if (TBAATag)

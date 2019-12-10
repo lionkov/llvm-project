@@ -22,6 +22,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/IR/PatternMatch.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -30,6 +31,7 @@
 #include <algorithm>
 
 using namespace llvm;
+using namespace PatternMatch;
 
 //===----------------------------------------------------------------------===//
 //                              Constant Class
@@ -148,6 +150,30 @@ bool Constant::isOneValue() const {
   return false;
 }
 
+bool Constant::isNotOneValue() const {
+  // Check for 1 integers
+  if (const ConstantInt *CI = dyn_cast<ConstantInt>(this))
+    return !CI->isOneValue();
+
+  // Check for FP which are bitcasted from 1 integers
+  if (const ConstantFP *CFP = dyn_cast<ConstantFP>(this))
+    return !CFP->getValueAPF().bitcastToAPInt().isOneValue();
+
+  // Check that vectors don't contain 1
+  if (this->getType()->isVectorTy()) {
+    unsigned NumElts = this->getType()->getVectorNumElements();
+    for (unsigned i = 0; i != NumElts; ++i) {
+      Constant *Elt = this->getAggregateElement(i);
+      if (!Elt || !Elt->isNotOneValue())
+        return false;
+    }
+    return true;
+  }
+
+  // It *may* contain 1, we can't tell.
+  return false;
+}
+
 bool Constant::isMinSignedValue() const {
   // Check for INT_MIN integers
   if (const ConstantInt *CI = dyn_cast<ConstantInt>(this))
@@ -248,6 +274,19 @@ bool Constant::isNaN() const {
       return false;
   }
   return true;
+}
+
+bool Constant::isElementWiseEqual(Value *Y) const {
+  // Are they fully identical?
+  if (this == Y)
+    return true;
+  // They may still be identical element-wise (if they have `undef`s).
+  auto *Cy = dyn_cast<Constant>(Y);
+  if (!Cy)
+    return false;
+  return match(ConstantExpr::getICmp(ICmpInst::Predicate::ICMP_EQ,
+                                     const_cast<Constant *>(this), Cy),
+               m_One());
 }
 
 bool Constant::containsUndefElement() const {
@@ -502,22 +541,32 @@ bool Constant::needsRelocation() const {
   if (const BlockAddress *BA = dyn_cast<BlockAddress>(this))
     return BA->getFunction()->needsRelocation();
 
-  // While raw uses of blockaddress need to be relocated, differences between
-  // two of them don't when they are for labels in the same function.  This is a
-  // common idiom when creating a table for the indirect goto extension, so we
-  // handle it efficiently here.
-  if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(this))
+  if (const ConstantExpr *CE = dyn_cast<ConstantExpr>(this)) {
     if (CE->getOpcode() == Instruction::Sub) {
       ConstantExpr *LHS = dyn_cast<ConstantExpr>(CE->getOperand(0));
       ConstantExpr *RHS = dyn_cast<ConstantExpr>(CE->getOperand(1));
       if (LHS && RHS && LHS->getOpcode() == Instruction::PtrToInt &&
-          RHS->getOpcode() == Instruction::PtrToInt &&
-          isa<BlockAddress>(LHS->getOperand(0)) &&
-          isa<BlockAddress>(RHS->getOperand(0)) &&
-          cast<BlockAddress>(LHS->getOperand(0))->getFunction() ==
-              cast<BlockAddress>(RHS->getOperand(0))->getFunction())
-        return false;
+          RHS->getOpcode() == Instruction::PtrToInt) {
+        Constant *LHSOp0 = LHS->getOperand(0);
+        Constant *RHSOp0 = RHS->getOperand(0);
+
+        // While raw uses of blockaddress need to be relocated, differences
+        // between two of them don't when they are for labels in the same
+        // function.  This is a common idiom when creating a table for the
+        // indirect goto extension, so we handle it efficiently here.
+        if (isa<BlockAddress>(LHSOp0) && isa<BlockAddress>(RHSOp0) &&
+            cast<BlockAddress>(LHSOp0)->getFunction() ==
+                cast<BlockAddress>(RHSOp0)->getFunction())
+          return false;
+
+        // Relative pointers do not need to be dynamically relocated.
+        if (auto *LHSGV = dyn_cast<GlobalValue>(LHSOp0->stripPointerCasts()))
+          if (auto *RHSGV = dyn_cast<GlobalValue>(RHSOp0->stripPointerCasts()))
+            if (LHSGV->isDSOLocal() && RHSGV->isDSOLocal())
+              return false;
+      }
     }
+  }
 
   bool Result = false;
   for (unsigned i = 0, e = getNumOperands(); i != e; ++i)
@@ -563,16 +612,35 @@ void Constant::removeDeadConstantUsers() const {
     }
 
     // If the constant was dead, then the iterator is invalidated.
-    if (LastNonDeadUser == E) {
+    if (LastNonDeadUser == E)
       I = user_begin();
-      if (I == E) break;
-    } else {
-      I = LastNonDeadUser;
-      ++I;
-    }
+    else
+      I = std::next(LastNonDeadUser);
   }
 }
 
+Constant *Constant::replaceUndefsWith(Constant *C, Constant *Replacement) {
+  assert(C && Replacement && "Expected non-nullptr constant arguments");
+  Type *Ty = C->getType();
+  if (match(C, m_Undef())) {
+    assert(Ty == Replacement->getType() && "Expected matching types");
+    return Replacement;
+  }
+
+  // Don't know how to deal with this constant.
+  if (!Ty->isVectorTy())
+    return C;
+
+  unsigned NumElts = Ty->getVectorNumElements();
+  SmallVector<Constant *, 32> NewC(NumElts);
+  for (unsigned i = 0; i != NumElts; ++i) {
+    Constant *EltC = C->getAggregateElement(i);
+    assert((!EltC || EltC->getType() == Replacement->getType()) &&
+           "Expected matching types");
+    NewC[i] = EltC && match(EltC, m_Undef()) ? Replacement : EltC;
+  }
+  return ConstantVector::get(NewC);
+}
 
 
 //===----------------------------------------------------------------------===//
@@ -2143,7 +2211,7 @@ Constant *ConstantExpr::getShuffleVector(Constant *V1, Constant *V2,
   if (Constant *FC = ConstantFoldShuffleVectorInstruction(V1, V2, Mask))
     return FC;          // Fold a few common cases.
 
-  unsigned NElts = Mask->getType()->getVectorNumElements();
+  ElementCount NElts = Mask->getType()->getVectorElementCount();
   Type *EltTy = V1->getType()->getVectorElementType();
   Type *ShufTy = VectorType::get(EltTy, NElts);
 
@@ -2960,7 +3028,7 @@ Value *ConstantExpr::handleOperandChangeImpl(Value *From, Value *ToV) {
       NewOps, this, From, To, NumUpdated, OperandNo);
 }
 
-Instruction *ConstantExpr::getAsInstruction() {
+Instruction *ConstantExpr::getAsInstruction() const {
   SmallVector<Value *, 4> ValueOperands(op_begin(), op_end());
   ArrayRef<Value*> Ops(ValueOperands);
 

@@ -207,6 +207,10 @@ names from both the *Processor* and *Alternative Processor* can be used.
                                                                                  names.
      ``gfx906``                  ``amdgcn``   dGPU  - xnack                   - Radeon Instinct MI50
                                                       [off]                   - Radeon Instinct MI60
+     ``gfx908``                  ``amdgcn``   dGPU  - xnack                   *TBA*
+                                                      [off]
+                                                      sram-ecc
+                                                      [on]
      ``gfx909``                  ``amdgcn``   APU   - xnack                   *TBA* (Raven Ridge 2)
                                                       [on]
                                                                               .. TODO
@@ -674,7 +678,7 @@ The AMDGPU backend uses the following ELF header:
      ``EF_AMDGPU_MACH_AMDGCN_GFX902``  0x02d      ``gfx902``
      ``EF_AMDGPU_MACH_AMDGCN_GFX904``  0x02e      ``gfx904``
      ``EF_AMDGPU_MACH_AMDGCN_GFX906``  0x02f      ``gfx906``
-     *reserved*                        0x030      Reserved.
+     ``EF_AMDGPU_MACH_AMDGCN_GFX908``  0x030      ``gfx908``
      ``EF_AMDGPU_MACH_AMDGCN_GFX909``  0x031      ``gfx909``
      *reserved*                        0x032      Reserved.
      ``EF_AMDGPU_MACH_AMDGCN_GFX1010`` 0x033      ``gfx1010``
@@ -1378,6 +1382,11 @@ non-AMD key names should be prefixed by "*vendor-name*.".
                                                   to the runtime printf buffer
                                                   is passed in kernarg.
 
+                                                "HiddenHostcallBuffer"
+                                                  A global address space pointer
+                                                  to the runtime hostcall buffer
+                                                  is passed in kernarg.
+
                                                 "HiddenDefaultQueue"
                                                   A global address space pointer
                                                   to the OpenCL device enqueue
@@ -1390,6 +1399,11 @@ non-AMD key names should be prefixed by "*vendor-name*.".
                                                   to help link enqueued kernels into
                                                   the ancestor tree for determining
                                                   when the parent kernel has finished.
+
+                                                "HiddenMultiGridSyncArg"
+                                                  A global address space pointer for
+                                                  multi-grid synchronization is
+                                                  passed in the kernarg.
 
      "ValueType"       string         Required  Kernel argument value type. Only
                                                 present if "ValueKind" is
@@ -1867,6 +1881,11 @@ same *vendor-name*.
                                                        to the runtime printf buffer
                                                        is passed in kernarg.
 
+                                                     "hidden_hostcall_buffer"
+                                                       A global address space pointer
+                                                       to the runtime hostcall buffer
+                                                       is passed in kernarg.
+
                                                      "hidden_default_queue"
                                                        A global address space pointer
                                                        to the OpenCL device enqueue
@@ -1879,6 +1898,11 @@ same *vendor-name*.
                                                        to help link enqueued kernels into
                                                        the ancestor tree for determining
                                                        when the parent kernel has finished.
+
+                                                     "hidden_multigrid_sync_arg"
+                                                       A global address space pointer for
+                                                       multi-grid synchronization is
+                                                       passed in the kernarg.
 
      ".value_type"          string         Required  Kernel argument value type. Only
                                                      present if ".value_kind" is
@@ -2110,23 +2134,23 @@ supported except by flat and scratch instructions in GFX9-GFX10.
 
 The generic address space uses the hardware flat address support available in
 GFX7-GFX10. This uses two fixed ranges of virtual addresses (the private and
-local appertures), that are outside the range of addressible global memory, to
+local apertures), that are outside the range of addressible global memory, to
 map from a flat address to a private or local address.
 
 FLAT instructions can take a flat address and access global, private (scratch)
 and group (LDS) memory depending in if the address is within one of the
-apperture ranges. Flat access to scratch requires hardware aperture setup and
+aperture ranges. Flat access to scratch requires hardware aperture setup and
 setup in the kernel prologue (see :ref:`amdgpu-amdhsa-flat-scratch`). Flat
 access to LDS requires hardware aperture setup and M0 (GFX7-GFX8) register setup
 (see :ref:`amdgpu-amdhsa-m0`).
 
 To convert between a segment address and a flat address the base address of the
-appertures address can be used. For GFX7-GFX8 these are available in the
+apertures address can be used. For GFX7-GFX8 these are available in the
 :ref:`amdgpu-amdhsa-hsa-aql-queue` the address of which can be obtained with
 Queue Ptr SGPR (see :ref:`amdgpu-amdhsa-initial-kernel-execution-state`). For
-GFX9-GFX10 the appature base addresses are directly available as inline constant
+GFX9-GFX10 the aperture base addresses are directly available as inline constant
 registers ``SRC_SHARED_BASE/LIMIT`` and ``SRC_PRIVATE_BASE/LIMIT``. In 64 bit
-address mode the apperture sizes are 2^32 bytes and the base is aligned to 2^32
+address mode the aperture sizes are 2^32 bytes and the base is aligned to 2^32
 which makes it easier to convert from flat to segment or segment to flat.
 
 Image and Samplers
@@ -2860,7 +2884,7 @@ SGPR register initial state is defined in
                                                     FLAT SCRATCH BASE in flat
                                                     memory instructions that
                                                     access the scratch
-                                                    apperture.
+                                                    aperture.
 
                                                     The second SGPR is 32 bit
                                                     byte size of a single
@@ -5696,6 +5720,8 @@ When the language is OpenCL the following differences occur:
                              enqueue_kernel.
      6        8    8         OpenCL address of AqlWrap struct used by
                              enqueue_kernel.
+     7        8    8         Pointer argument used for Multi-gird
+                             synchronization.
      ======== ==== ========= ===========================================
 
 .. _amdgpu-hcc:
@@ -5726,13 +5752,11 @@ Instructions
    AMDGPU/AMDGPUAsmGFX7
    AMDGPU/AMDGPUAsmGFX8
    AMDGPU/AMDGPUAsmGFX9
+   AMDGPU/AMDGPUAsmGFX10
    AMDGPUModifierSyntax
    AMDGPUOperandSyntax
    AMDGPUInstructionSyntax
    AMDGPUInstructionNotation
-
-.. TODO
-   AMDGPUAsmGFX10
 
 An instruction has the following :doc:`syntax<AMDGPUInstructionSyntax>`:
 
@@ -5745,7 +5769,8 @@ The order of *operands* and *modifiers* is fixed.
 Most *modifiers* are optional and may be omitted.
 
 See detailed instruction syntax description for :doc:`GFX7<AMDGPU/AMDGPUAsmGFX7>`,
-:doc:`GFX8<AMDGPU/AMDGPUAsmGFX8>` and :doc:`GFX9<AMDGPU/AMDGPUAsmGFX9>`.
+:doc:`GFX8<AMDGPU/AMDGPUAsmGFX8>`, :doc:`GFX9<AMDGPU/AMDGPUAsmGFX9>`
+and :doc:`GFX10<AMDGPU/AMDGPUAsmGFX10>`.
 
 Note that features under development are not included in this description.
 

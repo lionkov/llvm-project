@@ -126,7 +126,7 @@ using CanQualType = CanQual<Type>;
 
 // Provide forward declarations for all of the *Type classes.
 #define TYPE(Class, Base) class Class##Type;
-#include "clang/AST/TypeNodes.def"
+#include "clang/AST/TypeNodes.inc"
 
 /// The collection of all-type qualifiers we support.
 /// Clang supports five independent qualifiers:
@@ -972,6 +972,9 @@ public:
   friend bool operator!=(const QualType &LHS, const QualType &RHS) {
     return LHS.Value != RHS.Value;
   }
+  friend bool operator<(const QualType &LHS, const QualType &RHS) {
+    return LHS.Value < RHS.Value;
+  }
 
   static std::string getAsString(SplitQualType split,
                                  const PrintingPolicy &Policy) {
@@ -1042,6 +1045,9 @@ public:
   void Profile(llvm::FoldingSetNodeID &ID) const {
     ID.AddPointer(getAsOpaquePtr());
   }
+
+  /// Check if this type has any address space qualifier.
+  inline bool hasAddressSpace() const;
 
   /// Return the address space of this type.
   inline LangAS getAddressSpace() const;
@@ -1130,12 +1136,6 @@ public:
   };
 
   /// Check if this is a non-trivial type that would cause a C struct
-  /// transitively containing this type to be non-trivial. This function can be
-  /// used to determine whether a field of this type can be declared inside a C
-  /// union.
-  bool isNonTrivialPrimitiveCType(const ASTContext &Ctx) const;
-
-  /// Check if this is a non-trivial type that would cause a C struct
   /// transitively containing this type to be non-trivial to copy and return the
   /// kind.
   PrimitiveCopyKind isNonTrivialToPrimitiveCopy() const;
@@ -1163,6 +1163,22 @@ public:
   DestructionKind isDestructedType() const {
     return isDestructedTypeImpl(*this);
   }
+
+  /// Check if this is or contains a C union that is non-trivial to
+  /// default-initialize, which is a union that has a member that is non-trivial
+  /// to default-initialize. If this returns true,
+  /// isNonTrivialToPrimitiveDefaultInitialize returns PDIK_Struct.
+  bool hasNonTrivialToPrimitiveDefaultInitializeCUnion() const;
+
+  /// Check if this is or contains a C union that is non-trivial to destruct,
+  /// which is a union that has a member that is non-trivial to destruct. If
+  /// this returns true, isDestructedType returns DK_nontrivial_c_struct.
+  bool hasNonTrivialToPrimitiveDestructCUnion() const;
+
+  /// Check if this is or contains a C union that is non-trivial to copy, which
+  /// is a union that has a member that is non-trivial to copy. If this returns
+  /// true, isNonTrivialToPrimitiveCopy returns PCK_Struct.
+  bool hasNonTrivialToPrimitiveCopyCUnion() const;
 
   /// Determine whether expressions of the given type are forbidden
   /// from being lvalues in C.
@@ -1236,6 +1252,11 @@ private:
                                                  const ASTContext &C);
   static QualType IgnoreParens(QualType T);
   static DestructionKind isDestructedTypeImpl(QualType type);
+
+  /// Check if \param RD is or contains a non-trivial C union.
+  static bool hasNonTrivialToPrimitiveDefaultInitializeCUnion(const RecordDecl *RD);
+  static bool hasNonTrivialToPrimitiveDestructCUnion(const RecordDecl *RD);
+  static bool hasNonTrivialToPrimitiveCopyCUnion(const RecordDecl *RD);
 };
 
 } // namespace clang
@@ -1419,10 +1440,9 @@ class alignas(8) Type : public ExtQualsTypeCommonBase {
 public:
   enum TypeClass {
 #define TYPE(Class, Base) Class,
-#define LAST_TYPE(Class) TypeLast = Class,
+#define LAST_TYPE(Class) TypeLast = Class
 #define ABSTRACT_TYPE(Class, Base)
-#include "clang/AST/TypeNodes.def"
-    TagFirst = Record, TagLast = Enum
+#include "clang/AST/TypeNodes.inc"
   };
 
 private:
@@ -1494,6 +1514,15 @@ protected:
     /// 'int X[static restrict 4]'. For function parameters only.
     /// Actually an ArrayType::ArraySizeModifier.
     unsigned SizeModifier : 3;
+  };
+
+  class ConstantArrayTypeBitfields {
+    friend class ConstantArrayType;
+
+    unsigned : NumTypeBits + 3 + 3;
+
+    /// Whether we have a stored size expression.
+    unsigned HasStoredSizeExpr : 1;
   };
 
   class BuiltinTypeBitfields {
@@ -1717,6 +1746,7 @@ protected:
   union {
     TypeBitfields TypeBits;
     ArrayTypeBitfields ArrayTypeBits;
+    ConstantArrayTypeBitfields ConstantArrayTypeBits;
     AttributedTypeBitfields AttributedTypeBits;
     AutoTypeBitfields AutoTypeBits;
     BuiltinTypeBitfields BuiltinTypeBits;
@@ -2038,9 +2068,12 @@ public:
   bool isCARCBridgableType() const;
   bool isTemplateTypeParmType() const;          // C++ template type parameter
   bool isNullPtrType() const;                   // C++11 std::nullptr_t
+  bool isNothrowT() const;                      // C++   std::nothrow_t
   bool isAlignValT() const;                     // C++17 std::align_val_t
   bool isStdByteType() const;                   // C++17 std::byte
   bool isAtomicType() const;                    // C11 _Atomic()
+  bool isUndeducedAutoType() const;             // C++11 auto or
+                                                // C++14 decltype(auto)
 
 #define IMAGE_TYPE(ImgType, Id, SingletonId, Access, Suffix) \
   bool is##Id##Type() const;
@@ -2401,7 +2434,7 @@ template <> inline const Class##Type *Type::getAs() const { \
 template <> inline const Class##Type *Type::castAs() const { \
   return cast<Class##Type>(CanonicalType); \
 }
-#include "clang/AST/TypeNodes.def"
+#include "clang/AST/TypeNodes.inc"
 
 /// This class is used for builtin types like 'int'.  Builtin
 /// types are always canonical and have a literal name field.
@@ -2414,6 +2447,9 @@ public:
 // OpenCL extension types
 #define EXT_OPAQUE_TYPE(ExtType, Id, Ext) Id,
 #include "clang/Basic/OpenCLExtensionTypes.def"
+// SVE Types
+#define SVE_TYPE(Name, Id, SingletonId) Id,
+#include "clang/Basic/AArch64SVEACLETypes.def"
 // All other builtin types
 #define BUILTIN_TYPE(Id, SingletonId) Id,
 #define LAST_BUILTIN_TYPE(Id) LastKind = Id
@@ -2843,22 +2879,8 @@ private:
 protected:
   friend class ASTContext; // ASTContext creates these.
 
-  // C++ [temp.dep.type]p1:
-  //   A type is dependent if it is...
-  //     - an array type constructed from any dependent type or whose
-  //       size is specified by a constant expression that is
-  //       value-dependent,
-  ArrayType(TypeClass tc, QualType et, QualType can,
-            ArraySizeModifier sm, unsigned tq,
-            bool ContainsUnexpandedParameterPack)
-      : Type(tc, can, et->isDependentType() || tc == DependentSizedArray,
-             et->isInstantiationDependentType() || tc == DependentSizedArray,
-             (tc == VariableArray || et->isVariablyModifiedType()),
-             ContainsUnexpandedParameterPack),
-        ElementType(et) {
-    ArrayTypeBits.IndexTypeQuals = tq;
-    ArrayTypeBits.SizeModifier = sm;
-  }
+  ArrayType(TypeClass tc, QualType et, QualType can, ArraySizeModifier sm,
+            unsigned tq, const Expr *sz = nullptr);
 
 public:
   QualType getElementType() const { return ElementType; }
@@ -2886,25 +2908,35 @@ public:
 /// Represents the canonical version of C arrays with a specified constant size.
 /// For example, the canonical type for 'int A[4 + 4*100]' is a
 /// ConstantArrayType where the element type is 'int' and the size is 404.
-class ConstantArrayType : public ArrayType {
+class ConstantArrayType final
+    : public ArrayType,
+      private llvm::TrailingObjects<ConstantArrayType, const Expr *> {
+  friend class ASTContext; // ASTContext creates these.
+  friend TrailingObjects;
+
   llvm::APInt Size; // Allows us to unique the type.
 
   ConstantArrayType(QualType et, QualType can, const llvm::APInt &size,
-                    ArraySizeModifier sm, unsigned tq)
-      : ArrayType(ConstantArray, et, can, sm, tq,
-                  et->containsUnexpandedParameterPack()),
-        Size(size) {}
+                    const Expr *sz, ArraySizeModifier sm, unsigned tq)
+      : ArrayType(ConstantArray, et, can, sm, tq, sz), Size(size) {
+    ConstantArrayTypeBits.HasStoredSizeExpr = sz != nullptr;
+    if (ConstantArrayTypeBits.HasStoredSizeExpr) {
+      assert(!can.isNull() && "canonical constant array should not have size");
+      *getTrailingObjects<const Expr*>() = sz;
+    }
+  }
 
-protected:
-  friend class ASTContext; // ASTContext creates these.
-
-  ConstantArrayType(TypeClass tc, QualType et, QualType can,
-                    const llvm::APInt &size, ArraySizeModifier sm, unsigned tq)
-      : ArrayType(tc, et, can, sm, tq, et->containsUnexpandedParameterPack()),
-        Size(size) {}
+  unsigned numTrailingObjects(OverloadToken<const Expr*>) const {
+    return ConstantArrayTypeBits.HasStoredSizeExpr;
+  }
 
 public:
   const llvm::APInt &getSize() const { return Size; }
+  const Expr *getSizeExpr() const {
+    return ConstantArrayTypeBits.HasStoredSizeExpr
+               ? *getTrailingObjects<const Expr *>()
+               : nullptr;
+  }
   bool isSugared() const { return false; }
   QualType desugar() const { return QualType(this, 0); }
 
@@ -2918,19 +2950,15 @@ public:
   /// can require, which limits the maximum size of the array.
   static unsigned getMaxSizeBits(const ASTContext &Context);
 
-  void Profile(llvm::FoldingSetNodeID &ID) {
-    Profile(ID, getElementType(), getSize(),
+  void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Ctx) {
+    Profile(ID, Ctx, getElementType(), getSize(), getSizeExpr(),
             getSizeModifier(), getIndexTypeCVRQualifiers());
   }
 
-  static void Profile(llvm::FoldingSetNodeID &ID, QualType ET,
-                      const llvm::APInt &ArraySize, ArraySizeModifier SizeMod,
-                      unsigned TypeQuals) {
-    ID.AddPointer(ET.getAsOpaquePtr());
-    ID.AddInteger(ArraySize.getZExtValue());
-    ID.AddInteger(SizeMod);
-    ID.AddInteger(TypeQuals);
-  }
+  static void Profile(llvm::FoldingSetNodeID &ID, const ASTContext &Ctx,
+                      QualType ET, const llvm::APInt &ArraySize,
+                      const Expr *SizeExpr, ArraySizeModifier SizeMod,
+                      unsigned TypeQuals);
 
   static bool classof(const Type *T) {
     return T->getTypeClass() == ConstantArray;
@@ -2945,8 +2973,7 @@ class IncompleteArrayType : public ArrayType {
 
   IncompleteArrayType(QualType et, QualType can,
                       ArraySizeModifier sm, unsigned tq)
-      : ArrayType(IncompleteArray, et, can, sm, tq,
-                  et->containsUnexpandedParameterPack()) {}
+      : ArrayType(IncompleteArray, et, can, sm, tq) {}
 
 public:
   friend class StmtIteratorBase;
@@ -2998,8 +3025,7 @@ class VariableArrayType : public ArrayType {
   VariableArrayType(QualType et, QualType can, Expr *e,
                     ArraySizeModifier sm, unsigned tq,
                     SourceRange brackets)
-      : ArrayType(VariableArray, et, can, sm, tq,
-                  et->containsUnexpandedParameterPack()),
+      : ArrayType(VariableArray, et, can, sm, tq, e),
         SizeExpr((Stmt*) e), Brackets(brackets) {}
 
 public:
@@ -3705,9 +3731,9 @@ class FunctionProtoType final
     : public FunctionType,
       public llvm::FoldingSetNode,
       private llvm::TrailingObjects<
-          FunctionProtoType, QualType, FunctionType::FunctionTypeExtraBitfields,
-          FunctionType::ExceptionType, Expr *, FunctionDecl *,
-          FunctionType::ExtParameterInfo, Qualifiers> {
+          FunctionProtoType, QualType, SourceLocation,
+          FunctionType::FunctionTypeExtraBitfields, FunctionType::ExceptionType,
+          Expr *, FunctionDecl *, FunctionType::ExtParameterInfo, Qualifiers> {
   friend class ASTContext; // ASTContext creates these.
   friend TrailingObjects;
 
@@ -3717,6 +3743,9 @@ class FunctionProtoType final
   // * An array of getNumParams() QualType holding the parameter types.
   //   Always present. Note that for the vast majority of FunctionProtoType,
   //   these will be the only trailing objects.
+  //
+  // * Optionally if the function is variadic, the SourceLocation of the
+  //   ellipsis.
   //
   // * Optionally if some extra data is stored in FunctionTypeExtraBitfields
   //   (see FunctionTypeExtraBitfields and FunctionTypeBitfields):
@@ -3789,6 +3818,7 @@ public:
     RefQualifierKind RefQualifier = RQ_None;
     ExceptionSpecInfo ExceptionSpec;
     const ExtParameterInfo *ExtParameterInfos = nullptr;
+    SourceLocation EllipsisLoc;
 
     ExtProtoInfo() : Variadic(false), HasTrailingReturn(false) {}
 
@@ -3805,6 +3835,10 @@ public:
 private:
   unsigned numTrailingObjects(OverloadToken<QualType>) const {
     return getNumParams();
+  }
+
+  unsigned numTrailingObjects(OverloadToken<SourceLocation>) const {
+    return isVariadic();
   }
 
   unsigned numTrailingObjects(OverloadToken<FunctionTypeExtraBitfields>) const {
@@ -3918,6 +3952,7 @@ public:
     ExtProtoInfo EPI;
     EPI.ExtInfo = getExtInfo();
     EPI.Variadic = isVariadic();
+    EPI.EllipsisLoc = getEllipsisLoc();
     EPI.HasTrailingReturn = hasTrailingReturn();
     EPI.ExceptionSpec.Type = getExceptionSpecType();
     EPI.TypeQuals = getMethodQuals();
@@ -4018,6 +4053,11 @@ public:
 
   /// Whether this function prototype is variadic.
   bool isVariadic() const { return FunctionTypeBits.Variadic; }
+
+  SourceLocation getEllipsisLoc() const {
+    return isVariadic() ? *getTrailingObjects<SourceLocation>()
+                        : SourceLocation();
+  }
 
   /// Determines whether this function prototype contains a
   /// parameter pack at the end.
@@ -4414,7 +4454,7 @@ public:
   bool isBeingDefined() const;
 
   static bool classof(const Type *T) {
-    return T->getTypeClass() >= TagFirst && T->getTypeClass() <= TagLast;
+    return T->getTypeClass() == Enum || T->getTypeClass() == Record;
   }
 };
 
@@ -6239,6 +6279,11 @@ inline void QualType::removeLocalCVRQualifiers(unsigned Mask) {
   removeLocalFastQualifiers(Mask);
 }
 
+/// Check if this type has any address space qualifier.
+inline bool QualType::hasAddressSpace() const {
+  return getQualifiers().hasAddressSpace();
+}
+
 /// Return the address space of this type.
 inline LangAS QualType::getAddressSpace() const {
   return getQualifiers().getAddressSpace();
@@ -6247,6 +6292,24 @@ inline LangAS QualType::getAddressSpace() const {
 /// Return the gc attribute of this type.
 inline Qualifiers::GC QualType::getObjCGCAttr() const {
   return getQualifiers().getObjCGCAttr();
+}
+
+inline bool QualType::hasNonTrivialToPrimitiveDefaultInitializeCUnion() const {
+  if (auto *RD = getTypePtr()->getBaseElementTypeUnsafe()->getAsRecordDecl())
+    return hasNonTrivialToPrimitiveDefaultInitializeCUnion(RD);
+  return false;
+}
+
+inline bool QualType::hasNonTrivialToPrimitiveDestructCUnion() const {
+  if (auto *RD = getTypePtr()->getBaseElementTypeUnsafe()->getAsRecordDecl())
+    return hasNonTrivialToPrimitiveDestructCUnion(RD);
+  return false;
+}
+
+inline bool QualType::hasNonTrivialToPrimitiveCopyCUnion() const {
+  if (auto *RD = getTypePtr()->getBaseElementTypeUnsafe()->getAsRecordDecl())
+    return hasNonTrivialToPrimitiveCopyCUnion(RD);
+  return false;
 }
 
 inline FunctionType::ExtInfo getFunctionExtInfo(const Type &t) {
@@ -6314,6 +6377,7 @@ inline bool QualType::isCForbiddenLValueType() const {
 /// \returns True for types specified in C++0x [basic.fundamental].
 inline bool Type::isFundamentalType() const {
   return isVoidType() ||
+         isNullPtrType() ||
          // FIXME: It's really annoying that we don't have an
          // 'isArithmeticType()' which agrees with the standard definition.
          (isArithmeticType() && !isEnumeralType());
@@ -6467,6 +6531,10 @@ inline bool Type::isObjCObjectOrInterfaceType() const {
 
 inline bool Type::isAtomicType() const {
   return isa<AtomicType>(CanonicalType);
+}
+
+inline bool Type::isUndeducedAutoType() const {
+  return isa<AutoType>(CanonicalType);
 }
 
 inline bool Type::isObjCQualifiedIdType() const {

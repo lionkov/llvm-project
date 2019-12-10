@@ -117,9 +117,15 @@ public:
   /// Returns a reference to the ObjLinkingLayer
   ObjectLayer &getObjLinkingLayer() { return *ObjLinkingLayer; }
 
+  /// Returns a reference to the object transform layer.
+  ObjectTransformLayer &getObjTransformLayer() { return ObjTransformLayer; }
+
 protected:
   static std::unique_ptr<ObjectLayer>
   createObjectLinkingLayer(LLJITBuilderState &S, ExecutionSession &ES);
+
+  static Expected<IRCompileLayer::CompileFunction>
+  createCompileFunction(LLJITBuilderState &S, JITTargetMachineBuilder JTMB);
 
   /// Create an LLJIT instance with a single compile thread.
   LLJIT(LLJITBuilderState &S, Error &Err);
@@ -137,6 +143,7 @@ protected:
   std::unique_ptr<ThreadPool> CompileThreads;
 
   std::unique_ptr<ObjectLayer> ObjLinkingLayer;
+  ObjectTransformLayer ObjTransformLayer;
   std::unique_ptr<IRCompileLayer> CompileLayer;
 
   CtorDtorRunner CtorRunner, DtorRunner;
@@ -181,12 +188,17 @@ private:
 
 class LLJITBuilderState {
 public:
-  using CreateObjectLinkingLayerFunction =
-      std::function<std::unique_ptr<ObjectLayer>(ExecutionSession &)>;
+  using ObjectLinkingLayerCreator = std::function<std::unique_ptr<ObjectLayer>(
+      ExecutionSession &, const Triple &TT)>;
+
+  using CompileFunctionCreator =
+      std::function<Expected<IRCompileLayer::CompileFunction>(
+          JITTargetMachineBuilder JTMB)>;
 
   std::unique_ptr<ExecutionSession> ES;
   Optional<JITTargetMachineBuilder> JTMB;
-  CreateObjectLinkingLayerFunction CreateObjectLinkingLayer;
+  ObjectLinkingLayerCreator CreateObjectLinkingLayer;
+  CompileFunctionCreator CreateCompileFunction;
   unsigned NumCompileThreads = 0;
 
   /// Called prior to JIT class construcion to fix up defaults.
@@ -215,10 +227,21 @@ public:
   ///
   /// If this method is not called, a default creation function will be used
   /// that will construct an RTDyldObjectLinkingLayer.
-  SetterImpl &setCreateObjectLinkingLayer(
-      LLJITBuilderState::CreateObjectLinkingLayerFunction
-          CreateObjectLinkingLayer) {
+  SetterImpl &setObjectLinkingLayerCreator(
+      LLJITBuilderState::ObjectLinkingLayerCreator CreateObjectLinkingLayer) {
     impl().CreateObjectLinkingLayer = std::move(CreateObjectLinkingLayer);
+    return impl();
+  }
+
+  /// Set a CompileFunctionCreator.
+  ///
+  /// If this method is not called, a default creation function wil be used
+  /// that will construct a basic IR compile function that is compatible with
+  /// the selected number of threads (SimpleCompiler for '0' compile threads,
+  /// ConcurrentIRCompiler otherwise).
+  SetterImpl &setCompileFunctionCreator(
+      LLJITBuilderState::CompileFunctionCreator CreateCompileFunction) {
+    impl().CreateCompileFunction = std::move(CreateCompileFunction);
     return impl();
   }
 

@@ -5,9 +5,9 @@
 
 // Make sure we run dsymutil on source input files.
 // RUN: %clang -target i386-apple-darwin9 -### -g %s -o BAR 2> %t.log
-// RUN: grep '".*dsymutil" "-o" "BAR.dSYM" "BAR"' %t.log
+// RUN: grep -E '".*dsymutil(\.exe)?" "-o" "BAR.dSYM" "BAR"' %t.log
 // RUN: %clang -target i386-apple-darwin9 -### -g -filelist FOO %s -o BAR 2> %t.log
-// RUN: grep '".*dsymutil" "-o" "BAR.dSYM" "BAR"' %t.log
+// RUN: grep -E '".*dsymutil(\.exe)?" "-o" "BAR.dSYM" "BAR"' %t.log
 
 // Check linker changes that came with new linkedit format.
 // RUN: touch %t.o
@@ -345,6 +345,12 @@
 // RUN: FileCheck -check-prefix=LINK_PROFILE_FIRST %s < %t.log
 // LINK_PROFILE_FIRST: {{ld(.exe)?"}} "{{[^"]+}}libclang_rt.profile_{{[a-z]+}}.a"
 
+// RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate -### %t.o 2> %t.log
+// RUN: FileCheck -check-prefix=PROFILE_SECTALIGN %s < %t.log
+// RUN: %clang -target arm64-apple-ios12 -fprofile-instr-generate -### %t.o 2> %t.log
+// RUN: FileCheck -check-prefix=PROFILE_SECTALIGN %s < %t.log
+// PROFILE_SECTALIGN: "-sectalign" "__DATA" "__llvm_prf_cnts" "0x4000" "-sectalign" "__DATA" "__llvm_prf_data" "0x4000"
+
 // RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate -exported_symbols_list /dev/null -### %t.o 2> %t.log
 // RUN: FileCheck -check-prefix=PROFILE_EXPORT %s < %t.log
 // RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate -Wl,-exported_symbols_list,/dev/null -### %t.o 2> %t.log
@@ -355,7 +361,7 @@
 // RUN: FileCheck -check-prefix=PROFILE_EXPORT %s < %t.log
 // RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate -Xlinker -exported_symbols_list -Xlinker /dev/null -### %t.o 2> %t.log
 // RUN: FileCheck -check-prefix=PROFILE_EXPORT %s < %t.log
-// PROFILE_EXPORT: "-exported_symbol" "___llvm_profile_filename" "-exported_symbol" "___llvm_profile_raw_version" "-exported_symbol" "_lprofCurFilename"
+// PROFILE_EXPORT: "-exported_symbol" "___llvm_profile_filename" "-exported_symbol" "___llvm_profile_raw_version"
 //
 // RUN: %clang -target x86_64-apple-darwin12 -fprofile-instr-generate --coverage -### %t.o 2> %t.log
 // RUN: FileCheck -check-prefix=NO_PROFILE_EXPORT %s < %t.log

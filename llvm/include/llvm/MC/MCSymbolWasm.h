@@ -54,6 +54,13 @@ public:
     modifyFlags(wasm::WASM_SYMBOL_EXPORTED, wasm::WASM_SYMBOL_EXPORTED);
   }
 
+  bool isNoStrip() const {
+    return getFlags() & wasm::WASM_SYMBOL_NO_STRIP;
+  }
+  void setNoStrip() const {
+    modifyFlags(wasm::WASM_SYMBOL_NO_STRIP, wasm::WASM_SYMBOL_NO_STRIP);
+  }
+
   bool isWeak() const { return IsWeak; }
   void setWeak(bool isWeak) { IsWeak = isWeak; }
 
@@ -71,6 +78,7 @@ public:
   }
   void setImportModule(StringRef Name) { ImportModule = Name; }
 
+  bool hasImportName() const { return ImportName.hasValue(); }
   const StringRef getImportName() const {
       if (ImportName.hasValue()) {
           return ImportName.getValue();

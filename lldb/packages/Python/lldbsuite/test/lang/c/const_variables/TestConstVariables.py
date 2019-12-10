@@ -3,8 +3,6 @@
 from __future__ import print_function
 
 
-import os
-import time
 import lldb
 from lldbsuite.test.decorators import *
 from lldbsuite.test.lldbtest import *
@@ -26,12 +24,6 @@ class ConstVariableTestCase(TestBase):
         compiler="clang", compiler_version=["=", "3.8"])
     @expectedFailureAll(oslist=["freebsd", "linux"], compiler="icc")
     @expectedFailureAll(archs=['mips', 'mipsel', 'mips64', 'mips64el'])
-    @expectedFailureAll(
-        oslist=["linux"],
-        archs=[
-            'arm',
-            'aarch64'],
-        bugnumber="llvm.org/pr27883")
     @expectedFailureAll(
         oslist=["windows"],
         bugnumber="llvm.org/pr24489: Name lookup not working correctly on Windows")

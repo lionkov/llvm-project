@@ -51,7 +51,6 @@ class MCObjectStreamer : public MCStreamer {
   void EmitCFIStartProcImpl(MCDwarfFrameInfo &Frame) override;
   void EmitCFIEndProcImpl(MCDwarfFrameInfo &Frame) override;
   MCSymbol *EmitCFILabel() override;
-  void EmitInstructionImpl(const MCInst &Inst, const MCSubtargetInfo &STI);
   void resolvePendingFixups();
 
 protected:
@@ -84,7 +83,6 @@ public:
   /// Optionally a \p STI can be passed in so that a new fragment is created
   /// if the Subtarget differs from the current fragment.
   MCDataFragment *getOrCreateDataFragment(const MCSubtargetInfo* STI = nullptr);
-  MCPaddingFragment *getOrCreatePaddingFragment();
 
 protected:
   bool changeSectionImpl(MCSection *Section, const MCExpr *Subsection);
@@ -107,7 +105,8 @@ public:
   /// @{
 
   void EmitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override;
-  virtual void EmitLabel(MCSymbol *Symbol, SMLoc Loc, MCFragment *F);
+  virtual void EmitLabelAtPos(MCSymbol *Symbol, SMLoc Loc, MCFragment *F,
+                              uint64_t Offset);
   void EmitAssignment(MCSymbol *Symbol, const MCExpr *Value) override;
   void EmitValueImpl(const MCExpr *Value, unsigned Size,
                      SMLoc Loc = SMLoc()) override;
@@ -132,10 +131,6 @@ public:
                          unsigned MaxBytesToEmit = 0) override;
   void emitValueToOffset(const MCExpr *Offset, unsigned char Value,
                          SMLoc Loc) override;
-  void
-  EmitCodePaddingBasicBlockStart(const MCCodePaddingContext &Context) override;
-  void
-  EmitCodePaddingBasicBlockEnd(const MCCodePaddingContext &Context) override;
   void EmitDwarfLocDirective(unsigned FileNo, unsigned Line,
                              unsigned Column, unsigned Flags,
                              unsigned Isa, unsigned Discriminator,

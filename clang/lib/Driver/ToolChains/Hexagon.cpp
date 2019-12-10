@@ -183,7 +183,7 @@ void hexagon::Assembler::ConstructJob(Compilation &C, const JobAction &JA,
   }
 
   auto *Exec = Args.MakeArgString(HTC.GetProgramPath(AsName));
-  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+  C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
 }
 
 void hexagon::Linker::RenderExtraToolArgs(const JobAction &JA,
@@ -370,7 +370,7 @@ void hexagon::Linker::ConstructJob(Compilation &C, const JobAction &JA,
                            LinkingOutput);
 
   const char *Exec = Args.MakeArgString(HTC.GetLinkerPath());
-  C.addCommand(llvm::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
+  C.addCommand(std::make_unique<Command>(JA, *this, Exec, CmdArgs, Inputs));
 }
 // Hexagon tools end.
 
@@ -574,7 +574,7 @@ const StringRef HexagonToolChain::GetDefaultCPU() {
 
 const StringRef HexagonToolChain::GetTargetCPUVersion(const ArgList &Args) {
   Arg *CpuArg = nullptr;
-  if (Arg *A = Args.getLastArg(options::OPT_mcpu_EQ, options::OPT_march_EQ))
+  if (Arg *A = Args.getLastArg(options::OPT_mcpu_EQ))
     CpuArg = A;
 
   StringRef CPU = CpuArg ? CpuArg->getValue() : GetDefaultCPU();

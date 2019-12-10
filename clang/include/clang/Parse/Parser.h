@@ -766,6 +766,22 @@ private:
     Tok.setAnnotationValue(T.getAsOpaquePtr());
   }
 
+  static NamedDecl *getNonTypeAnnotation(const Token &Tok) {
+    return static_cast<NamedDecl*>(Tok.getAnnotationValue());
+  }
+
+  static void setNonTypeAnnotation(Token &Tok, NamedDecl *ND) {
+    Tok.setAnnotationValue(ND);
+  }
+
+  static IdentifierInfo *getIdentifierAnnotation(const Token &Tok) {
+    return static_cast<IdentifierInfo*>(Tok.getAnnotationValue());
+  }
+
+  static void setIdentifierAnnotation(Token &Tok, IdentifierInfo *ND) {
+    Tok.setAnnotationValue(ND);
+  }
+
   /// Read an already-translated primary expression out of an annotation
   /// token.
   static ExprResult getExprAnnotation(const Token &Tok) {
@@ -799,8 +815,7 @@ private:
     /// Annotation was successful.
     ANK_Success
   };
-  AnnotatedNameKind TryAnnotateName(bool IsAddressOfOperand,
-                                    CorrectionCandidateCallback *CCC = nullptr);
+  AnnotatedNameKind TryAnnotateName(CorrectionCandidateCallback *CCC = nullptr);
 
   /// Push a tok::annot_cxxscope token onto the token stream.
   void AnnotateScopeToken(CXXScopeSpec &SS, bool IsNewAnnotation);
@@ -972,7 +987,7 @@ private:
   };
 
   /// Consume any extra semi-colons until the end of the line.
-  void ConsumeExtraSemi(ExtraSemiKind Kind, unsigned TST = TST_unspecified);
+  void ConsumeExtraSemi(ExtraSemiKind Kind, DeclSpec::TST T = TST_unspecified);
 
   /// Return false if the next token is an identifier. An 'expected identifier'
   /// error is emitted otherwise.
@@ -1106,6 +1121,11 @@ public:
   /// SkipMalformedDecl - Read tokens until we get to some likely good stopping
   /// point for skipping past a simple-declaration.
   void SkipMalformedDecl();
+
+  /// The location of the first statement inside an else that might
+  /// have a missleading indentation. If there is no
+  /// MisleadingIndentationChecker on an else active, this location is invalid.
+  SourceLocation MisleadingIndentationElseLoc;
 
 private:
   //===--------------------------------------------------------------------===//
@@ -1743,13 +1763,13 @@ private:
                                   bool EnteringContext, IdentifierInfo &II,
                                   CXXScopeSpec &SS);
 
-  bool ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
-                                      ParsedType ObjectType,
+  bool ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS, ParsedType ObjectType,
                                       bool EnteringContext,
                                       bool *MayBePseudoDestructor = nullptr,
                                       bool IsTypename = false,
                                       IdentifierInfo **LastII = nullptr,
-                                      bool OnlyNamespace = false);
+                                      bool OnlyNamespace = false,
+                                      bool InUsingDeclaration = false);
 
   //===--------------------------------------------------------------------===//
   // C++11 5.1.2: Lambda expressions
@@ -1779,6 +1799,9 @@ private:
   //===--------------------------------------------------------------------===//
   // C++ 5.2p1: C++ Casts
   ExprResult ParseCXXCasts();
+
+  /// Parse a __builtin_bit_cast(T, E), used to implement C++2a std::bit_cast.
+  ExprResult ParseBuiltinBitCast();
 
   //===--------------------------------------------------------------------===//
   // C++ 5.2p1: C++ Type Identification
@@ -2104,12 +2127,13 @@ private:
 
   DeclGroupPtrTy ParseDeclaration(DeclaratorContext Context,
                                   SourceLocation &DeclEnd,
-                                  ParsedAttributesWithRange &attrs);
-  DeclGroupPtrTy ParseSimpleDeclaration(DeclaratorContext Context,
-                                        SourceLocation &DeclEnd,
-                                        ParsedAttributesWithRange &attrs,
-                                        bool RequireSemi,
-                                        ForRangeInit *FRI = nullptr);
+                                  ParsedAttributesWithRange &attrs,
+                                  SourceLocation *DeclSpecStart = nullptr);
+  DeclGroupPtrTy
+  ParseSimpleDeclaration(DeclaratorContext Context, SourceLocation &DeclEnd,
+                         ParsedAttributesWithRange &attrs, bool RequireSemi,
+                         ForRangeInit *FRI = nullptr,
+                         SourceLocation *DeclSpecStart = nullptr);
   bool MightBeDeclarator(DeclaratorContext Context);
   DeclGroupPtrTy ParseDeclGroup(ParsingDeclSpec &DS, DeclaratorContext Context,
                                 SourceLocation *DeclEnd = nullptr,
@@ -2157,7 +2181,7 @@ private:
                           const ParsedTemplateInfo &TemplateInfo,
                           AccessSpecifier AS, DeclSpecContext DSC);
   void ParseEnumBody(SourceLocation StartLoc, Decl *TagDecl);
-  void ParseStructUnionBody(SourceLocation StartLoc, unsigned TagType,
+  void ParseStructUnionBody(SourceLocation StartLoc, DeclSpec::TST TagType,
                             Decl *TagDecl);
 
   void ParseStructDeclaration(
@@ -2830,6 +2854,15 @@ private:
   DeclGroupPtrTy ParseOMPDeclareSimdClauses(DeclGroupPtrTy Ptr,
                                             CachedTokens &Toks,
                                             SourceLocation Loc);
+  /// Parses OpenMP context selectors and calls \p Callback for each
+  /// successfully parsed context selector.
+  bool
+  parseOpenMPContextSelectors(SourceLocation Loc,
+                              SmallVectorImpl<Sema::OMPCtxSelectorData> &Data);
+
+  /// Parse clauses for '#pragma omp declare variant'.
+  void ParseOMPDeclareVariantClauses(DeclGroupPtrTy Ptr, CachedTokens &Toks,
+                                     SourceLocation Loc);
   /// Parse clauses for '#pragma omp declare target'.
   DeclGroupPtrTy ParseOMPDeclareTargetClauses();
   /// Parse '#pragma omp end declare target'.
@@ -2923,7 +2956,8 @@ public:
   /// Parses simple expression in parens for single-expression clauses of OpenMP
   /// constructs.
   /// \param RLoc Returned location of right paren.
-  ExprResult ParseOpenMPParensExpr(StringRef ClauseName, SourceLocation &RLoc);
+  ExprResult ParseOpenMPParensExpr(StringRef ClauseName, SourceLocation &RLoc,
+                                   bool IsAddressOfOperand = false);
 
   /// Data used for parsing list of variables in OpenMP clauses.
   struct OpenMPVarListDataTy {
@@ -3021,6 +3055,10 @@ private:
                                    SourceLocation &DeclEnd,
                                    ParsedAttributes &AccessAttrs,
                                    AccessSpecifier AS = AS_none);
+  // C++2a: Template, concept definition [temp]
+  Decl *
+  ParseConceptDefinition(const ParsedTemplateInfo &TemplateInfo,
+                         SourceLocation &DeclEnd);
 
   //===--------------------------------------------------------------------===//
   // Modules

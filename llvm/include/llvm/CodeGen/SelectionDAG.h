@@ -26,8 +26,6 @@
 #include "llvm/ADT/ilist.h"
 #include "llvm/ADT/iterator.h"
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/Analysis/AliasAnalysis.h"
-#include "llvm/Analysis/LegacyDivergenceAnalysis.h"
 #include "llvm/CodeGen/DAGCombine.h"
 #include "llvm/CodeGen/FunctionLoweringInfo.h"
 #include "llvm/CodeGen/ISDOpcodes.h"
@@ -58,7 +56,9 @@
 
 namespace llvm {
 
+class AAResults;
 class BlockAddress;
+class BlockFrequencyInfo;
 class Constant;
 class ConstantFP;
 class ConstantInt;
@@ -66,11 +66,13 @@ class DataLayout;
 struct fltSemantics;
 class GlobalValue;
 struct KnownBits;
+class LegacyDivergenceAnalysis;
 class LLVMContext;
 class MachineBasicBlock;
 class MachineConstantPoolValue;
 class MCSymbol;
 class OptimizationRemarkEmitter;
+class ProfileSummaryInfo;
 class SDDbgValue;
 class SDDbgLabel;
 class SelectionDAG;
@@ -235,6 +237,9 @@ class SelectionDAG {
   /// whenever manipulating the DAG.
   OptimizationRemarkEmitter *ORE;
 
+  ProfileSummaryInfo *PSI = nullptr;
+  BlockFrequencyInfo *BFI = nullptr;
+
   /// The starting token.
   SDNode EntryNode;
 
@@ -269,7 +274,13 @@ class SelectionDAG {
 
   using CallSiteInfo = MachineFunction::CallSiteInfo;
   using CallSiteInfoImpl = MachineFunction::CallSiteInfoImpl;
-  DenseMap<const SDNode *, CallSiteInfo> SDCallSiteInfo;
+
+  struct CallSiteDbgInfo {
+    CallSiteInfo CSInfo;
+    MDNode *HeapAllocSite = nullptr;
+  };
+
+  DenseMap<const SDNode *, CallSiteDbgInfo> SDCallSiteDbgInfo;
 
   uint16_t NextPersistentId = 0;
 
@@ -382,7 +393,11 @@ private:
     Node->OperandList = nullptr;
   }
   void CreateTopologicalOrder(std::vector<SDNode*>& Order);
+
 public:
+  // Maximum depth for recursive analysis such as computeKnownBits, etc.
+  static constexpr unsigned MaxRecursionDepth = 6;
+
   explicit SelectionDAG(const TargetMachine &TM, CodeGenOpt::Level);
   SelectionDAG(const SelectionDAG &) = delete;
   SelectionDAG &operator=(const SelectionDAG &) = delete;
@@ -391,7 +406,8 @@ public:
   /// Prepare this SelectionDAG to process code in the given MachineFunction.
   void init(MachineFunction &NewMF, OptimizationRemarkEmitter &NewORE,
             Pass *PassPtr, const TargetLibraryInfo *LibraryInfo,
-            LegacyDivergenceAnalysis * Divergence);
+            LegacyDivergenceAnalysis * Divergence,
+            ProfileSummaryInfo *PSIin, BlockFrequencyInfo *BFIin);
 
   void setFunctionLoweringInfo(FunctionLoweringInfo * FuncInfo) {
     FLI = FuncInfo;
@@ -411,8 +427,10 @@ public:
   const TargetLibraryInfo &getLibInfo() const { return *LibInfo; }
   const SelectionDAGTargetInfo &getSelectionDAGInfo() const { return *TSI; }
   const LegacyDivergenceAnalysis *getDivergenceAnalysis() const { return DA; }
-  LLVMContext *getContext() const {return Context; }
+  LLVMContext *getContext() const { return Context; }
   OptimizationRemarkEmitter &getORE() const { return *ORE; }
+  ProfileSummaryInfo *getPSI() const { return PSI; }
+  BlockFrequencyInfo *getBFI() const { return BFI; }
 
   /// Pop up a GraphViz/gv window with the DAG rendered using 'dot'.
   void viewGraph(const std::string &Title);
@@ -489,7 +507,7 @@ public:
   /// certain types of nodes together, or eliminating superfluous nodes.  The
   /// Level argument controls whether Combine is allowed to produce nodes and
   /// types that are illegal on the target.
-  void Combine(CombineLevel Level, AliasAnalysis *AA,
+  void Combine(CombineLevel Level, AAResults *AA,
                CodeGenOpt::Level OptLevel);
 
   /// This transforms the SelectionDAG into a SelectionDAG that
@@ -628,10 +646,9 @@ public:
 
   SDValue getGlobalAddress(const GlobalValue *GV, const SDLoc &DL, EVT VT,
                            int64_t offset = 0, bool isTargetGA = false,
-                           unsigned char TargetFlags = 0);
+                           unsigned TargetFlags = 0);
   SDValue getTargetGlobalAddress(const GlobalValue *GV, const SDLoc &DL, EVT VT,
-                                 int64_t offset = 0,
-                                 unsigned char TargetFlags = 0) {
+                                 int64_t offset = 0, unsigned TargetFlags = 0) {
     return getGlobalAddress(GV, DL, VT, offset, true, TargetFlags);
   }
   SDValue getFrameIndex(int FI, EVT VT, bool isTarget = false);
@@ -639,28 +656,27 @@ public:
     return getFrameIndex(FI, VT, true);
   }
   SDValue getJumpTable(int JTI, EVT VT, bool isTarget = false,
-                       unsigned char TargetFlags = 0);
-  SDValue getTargetJumpTable(int JTI, EVT VT, unsigned char TargetFlags = 0) {
+                       unsigned TargetFlags = 0);
+  SDValue getTargetJumpTable(int JTI, EVT VT, unsigned TargetFlags = 0) {
     return getJumpTable(JTI, VT, true, TargetFlags);
   }
-  SDValue getConstantPool(const Constant *C, EVT VT,
-                          unsigned Align = 0, int Offs = 0, bool isT=false,
-                          unsigned char TargetFlags = 0);
-  SDValue getTargetConstantPool(const Constant *C, EVT VT,
-                                unsigned Align = 0, int Offset = 0,
-                                unsigned char TargetFlags = 0) {
+  SDValue getConstantPool(const Constant *C, EVT VT, unsigned Align = 0,
+                          int Offs = 0, bool isT = false,
+                          unsigned TargetFlags = 0);
+  SDValue getTargetConstantPool(const Constant *C, EVT VT, unsigned Align = 0,
+                                int Offset = 0, unsigned TargetFlags = 0) {
     return getConstantPool(C, VT, Align, Offset, true, TargetFlags);
   }
   SDValue getConstantPool(MachineConstantPoolValue *C, EVT VT,
                           unsigned Align = 0, int Offs = 0, bool isT=false,
-                          unsigned char TargetFlags = 0);
-  SDValue getTargetConstantPool(MachineConstantPoolValue *C,
-                                  EVT VT, unsigned Align = 0,
-                                  int Offset = 0, unsigned char TargetFlags=0) {
+                          unsigned TargetFlags = 0);
+  SDValue getTargetConstantPool(MachineConstantPoolValue *C, EVT VT,
+                                unsigned Align = 0, int Offset = 0,
+                                unsigned TargetFlags = 0) {
     return getConstantPool(C, VT, Align, Offset, true, TargetFlags);
   }
   SDValue getTargetIndex(int Index, EVT VT, int64_t Offset = 0,
-                         unsigned char TargetFlags = 0);
+                         unsigned TargetFlags = 0);
   // When generating a branch to a BB, we don't in general know enough
   // to provide debug info for the BB at that time, so keep this one around.
   SDValue getBasicBlock(MachineBasicBlock *MBB);
@@ -668,7 +684,7 @@ public:
   SDValue getExternalSymbol(const char *Sym, EVT VT);
   SDValue getExternalSymbol(const char *Sym, const SDLoc &dl, EVT VT);
   SDValue getTargetExternalSymbol(const char *Sym, EVT VT,
-                                  unsigned char TargetFlags = 0);
+                                  unsigned TargetFlags = 0);
   SDValue getMCSymbol(MCSymbol *Sym, EVT VT);
 
   SDValue getValueType(EVT);
@@ -677,12 +693,10 @@ public:
   SDValue getEHLabel(const SDLoc &dl, SDValue Root, MCSymbol *Label);
   SDValue getLabelNode(unsigned Opcode, const SDLoc &dl, SDValue Root,
                        MCSymbol *Label);
-  SDValue getBlockAddress(const BlockAddress *BA, EVT VT,
-                          int64_t Offset = 0, bool isTarget = false,
-                          unsigned char TargetFlags = 0);
+  SDValue getBlockAddress(const BlockAddress *BA, EVT VT, int64_t Offset = 0,
+                          bool isTarget = false, unsigned TargetFlags = 0);
   SDValue getTargetBlockAddress(const BlockAddress *BA, EVT VT,
-                                int64_t Offset = 0,
-                                unsigned char TargetFlags = 0) {
+                                int64_t Offset = 0, unsigned TargetFlags = 0) {
     return getBlockAddress(BA, VT, Offset, true, TargetFlags);
   }
 
@@ -771,6 +785,20 @@ public:
 
     SmallVector<SDValue, 16> Ops(VT.getVectorNumElements(), Op);
     return getNode(ISD::BUILD_VECTOR, DL, VT, Ops);
+  }
+
+  // Return a splat ISD::SPLAT_VECTOR node, consisting of Op splatted to all
+  // elements.
+  SDValue getSplatVector(EVT VT, const SDLoc &DL, SDValue Op) {
+    if (Op.getOpcode() == ISD::UNDEF) {
+      assert((VT.getVectorElementType() == Op.getValueType() ||
+              (VT.isInteger() &&
+               VT.getVectorElementType().bitsLE(Op.getValueType()))) &&
+             "A splatted value must have a width equal or (for integers) "
+             "greater than the vector element type!");
+      return getNode(ISD::UNDEF, SDLoc(), VT);
+    }
+    return getNode(ISD::SPLAT_VECTOR, DL, VT, Op);
   }
 
   /// Returns an ISD::VECTOR_SHUFFLE node semantically equivalent to
@@ -1035,7 +1063,8 @@ public:
     unsigned Align = 0,
     MachineMemOperand::Flags Flags
     = MachineMemOperand::MOLoad | MachineMemOperand::MOStore,
-    unsigned Size = 0);
+    uint64_t Size = 0,
+    const AAMDNodes &AAInfo = AAMDNodes());
 
   SDValue getMemIntrinsicNode(unsigned Opcode, const SDLoc &dl, SDVTList VTList,
                               ArrayRef<SDValue> Ops, EVT MemVT,
@@ -1107,18 +1136,25 @@ public:
   /// Returns sum of the base pointer and offset.
   SDValue getMemBasePlusOffset(SDValue Base, unsigned Offset, const SDLoc &DL);
 
-  SDValue getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain, SDValue Ptr,
-                        SDValue Mask, SDValue Src0, EVT MemVT,
-                        MachineMemOperand *MMO, ISD::LoadExtType,
-                        bool IsExpanding = false);
+  SDValue getMaskedLoad(EVT VT, const SDLoc &dl, SDValue Chain, SDValue Base,
+                        SDValue Offset, SDValue Mask, SDValue Src0, EVT MemVT,
+                        MachineMemOperand *MMO, ISD::MemIndexedMode AM,
+                        ISD::LoadExtType, bool IsExpanding = false);
+  SDValue getIndexedMaskedLoad(SDValue OrigLoad, const SDLoc &dl, SDValue Base,
+                               SDValue Offset, ISD::MemIndexedMode AM);
   SDValue getMaskedStore(SDValue Chain, const SDLoc &dl, SDValue Val,
-                         SDValue Ptr, SDValue Mask, EVT MemVT,
-                         MachineMemOperand *MMO, bool IsTruncating = false,
-                         bool IsCompressing = false);
+                         SDValue Base, SDValue Offset, SDValue Mask, EVT MemVT,
+                         MachineMemOperand *MMO, ISD::MemIndexedMode AM,
+                         bool IsTruncating = false, bool IsCompressing = false);
+  SDValue getIndexedMaskedStore(SDValue OrigStore, const SDLoc &dl,
+                                SDValue Base, SDValue Offset,
+                                ISD::MemIndexedMode AM);
   SDValue getMaskedGather(SDVTList VTs, EVT VT, const SDLoc &dl,
-                          ArrayRef<SDValue> Ops, MachineMemOperand *MMO);
+                          ArrayRef<SDValue> Ops, MachineMemOperand *MMO,
+                          ISD::MemIndexType IndexType);
   SDValue getMaskedScatter(SDVTList VTs, EVT VT, const SDLoc &dl,
-                           ArrayRef<SDValue> Ops, MachineMemOperand *MMO);
+                           ArrayRef<SDValue> Ops, MachineMemOperand *MMO,
+                           ISD::MemIndexType IndexType);
 
   /// Return (create a new or find existing) a target-specific node.
   /// TargetMemSDNode should be derived class from MemSDNode.
@@ -1587,9 +1623,12 @@ public:
   /// Extract. The reduction must use one of the opcodes listed in /p
   /// CandidateBinOps and on success /p BinOp will contain the matching opcode.
   /// Returns the vector that is being reduced on, or SDValue() if a reduction
-  /// was not matched.
+  /// was not matched. If \p AllowPartials is set then in the case of a
+  /// reduction pattern that only matches the first few stages, the extracted
+  /// subvector of the start of the reduction is returned.
   SDValue matchBinOpReduction(SDNode *Extract, ISD::NodeType &BinOp,
-                              ArrayRef<ISD::NodeType> CandidateBinOps);
+                              ArrayRef<ISD::NodeType> CandidateBinOps,
+                              bool AllowPartials = false);
 
   /// Utility function used by legalize and lowering to
   /// "unroll" a vector operation by splitting out the scalars and operating
@@ -1663,15 +1702,35 @@ public:
   }
 
   void addCallSiteInfo(const SDNode *CallNode, CallSiteInfoImpl &&CallInfo) {
-    SDCallSiteInfo[CallNode] = std::move(CallInfo);
+    SDCallSiteDbgInfo[CallNode].CSInfo = std::move(CallInfo);
   }
 
   CallSiteInfo getSDCallSiteInfo(const SDNode *CallNode) {
-    auto I = SDCallSiteInfo.find(CallNode);
-    if (I != SDCallSiteInfo.end())
-      return std::move(I->second);
+    auto I = SDCallSiteDbgInfo.find(CallNode);
+    if (I != SDCallSiteDbgInfo.end())
+      return std::move(I->second).CSInfo;
     return CallSiteInfo();
   }
+
+  void addHeapAllocSite(const SDNode *Node, MDNode *MD) {
+    SDCallSiteDbgInfo[Node].HeapAllocSite = MD;
+  }
+
+  /// Return the HeapAllocSite type associated with the SDNode, if it exists.
+  MDNode *getHeapAllocSite(const SDNode *Node) {
+    auto It = SDCallSiteDbgInfo.find(Node);
+    if (It == SDCallSiteDbgInfo.end())
+      return nullptr;
+    return It->second.HeapAllocSite;
+  }
+
+  /// Return the current function's default denormal handling kind for the given
+  /// floating point type.
+  DenormalMode getDenormalMode(EVT VT) const {
+    return MF->getDenormalMode(EVTToAPFloatSemantics(VT));
+  }
+
+  bool shouldOptForSize() const;
 
 private:
   void InsertNode(SDNode *N);
@@ -1711,7 +1770,7 @@ private:
   std::map<EVT, SDNode*, EVT::compareRawBits> ExtendedValueTypeNodes;
   StringMap<SDNode*> ExternalSymbols;
 
-  std::map<std::pair<std::string, unsigned char>,SDNode*> TargetExternalSymbols;
+  std::map<std::pair<std::string, unsigned>, SDNode *> TargetExternalSymbols;
   DenseMap<MCSymbol *, SDNode *> MCSymbols;
 };
 

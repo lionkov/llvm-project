@@ -438,7 +438,7 @@ Init *BitsInit::resolveReferences(Resolver &R) const {
         CachedBitVarRef = CurBitVar->getBitVar();
         CachedBitVarResolved = CachedBitVarRef->resolveReferences(R);
       }
-
+      assert(CachedBitVarResolved && "Unresolved bitvar reference");
       NewBit = CachedBitVarResolved->getBit(CurBitVar->getBitNum());
     } else {
       // getBit(0) implicitly converts int and bits<1> values to bit.
@@ -887,13 +887,18 @@ Init *BinOpInit::Fold(Record *CurRec) const {
     if (LHSs && RHSs) {
       DefInit *LOp = dyn_cast<DefInit>(LHSs->getOperator());
       DefInit *ROp = dyn_cast<DefInit>(RHSs->getOperator());
-      if (!LOp || !ROp)
+      if ((!LOp && !isa<UnsetInit>(LHSs->getOperator())) ||
+          (!ROp && !isa<UnsetInit>(RHSs->getOperator())))
         break;
-      if (LOp->getDef() != ROp->getDef()) {
+      if (LOp && ROp && LOp->getDef() != ROp->getDef()) {
         PrintFatalError(Twine("Concatenated Dag operators do not match: '") +
                         LHSs->getAsString() + "' vs. '" + RHSs->getAsString() +
                         "'");
       }
+      Init *Op = LOp ? LOp : ROp;
+      if (!Op)
+        Op = UnsetInit::get();
+
       SmallVector<Init*, 8> Args;
       SmallVector<StringInit*, 8> ArgNames;
       for (unsigned i = 0, e = LHSs->getNumArgs(); i != e; ++i) {
@@ -904,7 +909,7 @@ Init *BinOpInit::Fold(Record *CurRec) const {
         Args.push_back(RHSs->getArg(i));
         ArgNames.push_back(RHSs->getArgName(i));
       }
-      return DagInit::get(LHSs->getOperator(), nullptr, Args, ArgNames);
+      return DagInit::get(Op, nullptr, Args, ArgNames);
     }
     break;
   }
@@ -1616,7 +1621,7 @@ void VarDefInit::Profile(FoldingSetNodeID &ID) const {
 DefInit *VarDefInit::instantiate() {
   if (!Def) {
     RecordKeeper &Records = Class->getRecords();
-    auto NewRecOwner = make_unique<Record>(Records.getNewAnonymousName(),
+    auto NewRecOwner = std::make_unique<Record>(Records.getNewAnonymousName(),
                                            Class->getLoc(), Records,
                                            /*IsAnonymous=*/true);
     Record *NewRec = NewRecOwner.get();
@@ -1928,6 +1933,13 @@ DagInit::get(Init *V, StringInit *VN,
 
 void DagInit::Profile(FoldingSetNodeID &ID) const {
   ProfileDagInit(ID, Val, ValName, makeArrayRef(getTrailingObjects<Init *>(), NumArgs), makeArrayRef(getTrailingObjects<StringInit *>(), NumArgNames));
+}
+
+Record *DagInit::getOperatorAsDef(ArrayRef<SMLoc> Loc) const {
+  if (DefInit *DefI = dyn_cast<DefInit>(Val))
+    return DefI->getDef();
+  PrintFatalError(Loc, "Expected record as operator");
+  return nullptr;
 }
 
 Init *DagInit::resolveReferences(Resolver &R) const {
@@ -2269,6 +2281,21 @@ Record *Record::getValueAsDef(StringRef FieldName) const {
   PrintFatalError(getLoc(), "Record `" + getName() + "', field `" +
     FieldName + "' does not have a def initializer!");
 }
+
+Record *Record::getValueAsOptionalDef(StringRef FieldName) const {
+  const RecordVal *R = getValue(FieldName);
+  if (!R || !R->getValue())
+    PrintFatalError(getLoc(), "Record `" + getName() +
+      "' does not have a field named `" + FieldName + "'!\n");
+
+  if (DefInit *DI = dyn_cast<DefInit>(R->getValue()))
+    return DI->getDef();
+  if (isa<UnsetInit>(R->getValue()))
+    return nullptr;
+  PrintFatalError(getLoc(), "Record `" + getName() + "', field `" +
+    FieldName + "' does not have either a def initializer or '?'!");
+}
+
 
 bool Record::getValueAsBit(StringRef FieldName) const {
   const RecordVal *R = getValue(FieldName);

@@ -50,6 +50,8 @@ template <class Allocator, u32 MaxTSDCount> struct TSDRegistrySharedT {
   void unmapTestOnly() {
     unmap(reinterpret_cast<void *>(TSDs),
           sizeof(TSD<Allocator>) * NumberOfTSDs);
+    setCurrentTSD(nullptr);
+    pthread_key_delete(PThreadKey);
   }
 
   ALWAYS_INLINE void initThreadMaybe(Allocator *Instance,
@@ -72,7 +74,7 @@ template <class Allocator, u32 MaxTSDCount> struct TSDRegistrySharedT {
 
 private:
   ALWAYS_INLINE void setCurrentTSD(TSD<Allocator> *CurrentTSD) {
-#if SCUDO_ANDROID
+#if _BIONIC
     *getAndroidTlsPtr() = reinterpret_cast<uptr>(CurrentTSD);
 #elif SCUDO_LINUX
     ThreadTSD = CurrentTSD;
@@ -84,7 +86,7 @@ private:
   }
 
   ALWAYS_INLINE TSD<Allocator> *getCurrentTSD() {
-#if SCUDO_ANDROID
+#if _BIONIC
     return reinterpret_cast<TSD<Allocator> *>(*getAndroidTlsPtr());
 #elif SCUDO_LINUX
     return ThreadTSD;
@@ -94,8 +96,8 @@ private:
   }
 
   void initOnceMaybe(Allocator *Instance) {
-    SpinMutexLock L(&Mutex);
-    if (Initialized)
+    ScopedLock L(Mutex);
+    if (LIKELY(Initialized))
       return;
     initLinkerInitialized(Instance); // Sets Initialized.
   }
@@ -112,8 +114,7 @@ private:
       // Use the Precedence of the current TSD as our random seed. Since we are
       // in the slow path, it means that tryLock failed, and as a result it's
       // very likely that said Precedence is non-zero.
-      u32 RandState = static_cast<u32>(CurrentTSD->getPrecedence());
-      const u32 R = getRandomU32(&RandState);
+      const u32 R = static_cast<u32>(CurrentTSD->getPrecedence());
       const u32 Inc = CoPrimes[R % NumberOfCoPrimes];
       u32 Index = R % NumberOfTSDs;
       uptr LowestPrecedence = UINTPTR_MAX;
@@ -152,13 +153,13 @@ private:
   u32 NumberOfCoPrimes;
   u32 CoPrimes[MaxTSDCount];
   bool Initialized;
-  StaticSpinMutex Mutex;
-#if SCUDO_LINUX && !SCUDO_ANDROID
+  HybridMutex Mutex;
+#if SCUDO_LINUX && !_BIONIC
   static THREADLOCAL TSD<Allocator> *ThreadTSD;
 #endif
 };
 
-#if SCUDO_LINUX && !SCUDO_ANDROID
+#if SCUDO_LINUX && !_BIONIC
 template <class Allocator, u32 MaxTSDCount>
 THREADLOCAL TSD<Allocator>
     *TSDRegistrySharedT<Allocator, MaxTSDCount>::ThreadTSD;

@@ -52,24 +52,15 @@ public:
   void
   EnableCategory(ConstString category_name,
                  TypeCategoryMap::Position pos = TypeCategoryMap::Default) {
-    EnableCategory(category_name, pos,
-                   std::initializer_list<lldb::LanguageType>());
+    EnableCategory(category_name, pos, {});
   }
 
   void EnableCategory(ConstString category_name,
                       TypeCategoryMap::Position pos, lldb::LanguageType lang) {
-    std::initializer_list<lldb::LanguageType> langs = {lang};
-    EnableCategory(category_name, pos, langs);
-  }
-
-  void EnableCategory(ConstString category_name,
-                      TypeCategoryMap::Position pos = TypeCategoryMap::Default,
-                      std::initializer_list<lldb::LanguageType> langs = {}) {
     TypeCategoryMap::ValueSP category_sp;
     if (m_categories_map.Get(category_name, category_sp) && category_sp) {
       m_categories_map.Enable(category_sp, pos);
-      for (const lldb::LanguageType lang : langs)
-        category_sp->AddLanguage(lang);
+      category_sp->AddLanguage(lang);
     }
   }
 
@@ -198,9 +189,6 @@ public:
   GetCandidateLanguages(lldb::LanguageType lang_type);
 
 private:
-  static std::vector<lldb::LanguageType>
-  GetCandidateLanguages(ValueObject &valobj);
-
   static void GetPossibleMatches(ValueObject &valobj,
                                  CompilerType compiler_type, uint32_t reason,
                                  lldb::DynamicValueType use_dynamic,

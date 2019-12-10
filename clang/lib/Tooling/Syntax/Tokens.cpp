@@ -35,6 +35,12 @@
 using namespace clang;
 using namespace clang::syntax;
 
+syntax::Token::Token(SourceLocation Location, unsigned Length,
+                     tok::TokenKind Kind)
+    : Location(Location), Length(Length), Kind(Kind) {
+  assert(Location.isValid());
+}
+
 syntax::Token::Token(const clang::Token &T)
     : Token(T.getLocation(), T.getLength(), T.getKind()) {
   assert(!T.isAnnotation());
@@ -111,6 +117,22 @@ llvm::StringRef FileRange::text(const SourceManager &SM) const {
   assert(Begin <= Text.size());
   assert(End <= Text.size());
   return Text.substr(Begin, length());
+}
+
+llvm::ArrayRef<syntax::Token> TokenBuffer::expandedTokens(SourceRange R) const {
+  if (R.isInvalid())
+    return {};
+  const Token *Begin =
+      llvm::partition_point(expandedTokens(), [&](const syntax::Token &T) {
+        return SourceMgr->isBeforeInTranslationUnit(T.location(), R.getBegin());
+      });
+  const Token *End =
+      llvm::partition_point(expandedTokens(), [&](const syntax::Token &T) {
+        return !SourceMgr->isBeforeInTranslationUnit(R.getEnd(), T.location());
+      });
+  if (Begin > End)
+    return {};
+  return {Begin, End};
 }
 
 std::pair<const syntax::Token *, const TokenBuffer::Mapping *>
@@ -226,6 +248,21 @@ TokenBuffer::expansionStartingAt(const syntax::Token *Spelled) const {
   return E;
 }
 
+std::vector<const syntax::Token *>
+TokenBuffer::macroExpansions(FileID FID) const {
+  auto FileIt = Files.find(FID);
+  assert(FileIt != Files.end() && "file not tracked by token buffer");
+  auto &File = FileIt->second;
+  std::vector<const syntax::Token *> Expansions;
+  auto &Spelled = File.SpelledTokens;
+  for (auto Mapping : File.Mappings) {
+    const syntax::Token *Token = &Spelled[Mapping.BeginSpelled];
+    if (Token->kind() == tok::TokenKind::identifier)
+      Expansions.push_back(Token);
+  }
+  return Expansions;
+}
+
 std::vector<syntax::Token> syntax::tokenize(FileID FID, const SourceManager &SM,
                                             const LangOptions &LO) {
   std::vector<syntax::Token> Tokens;
@@ -315,7 +352,7 @@ TokenCollector::TokenCollector(Preprocessor &PP) : PP(PP) {
   });
   // And locations of macro calls, to properly recover boundaries of those in
   // case of empty expansions.
-  auto CB = llvm::make_unique<CollectPPExpansions>(*this);
+  auto CB = std::make_unique<CollectPPExpansions>(*this);
   this->Collector = CB.get();
   PP.addPPCallbacks(std::move(CB));
 }

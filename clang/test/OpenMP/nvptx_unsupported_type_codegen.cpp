@@ -1,11 +1,11 @@
 // Test target codegen - host bc file has to be created first.
 // RUN: %clang_cc1 -verify -fopenmp -x c++ -triple x86_64-unknown-linux -fopenmp-targets=nvptx64-nvidia-cuda -emit-llvm-bc %s -o %t-host.bc
-// RUN: %clang_cc1 -verify -fopenmp -x c++ -triple nvptx64-unknown-unknown -aux-triple x86_64-unknown-linux -fopenmp-targets=nvptx64-nvidia-cuda -aux-triple x86_64-unknown-linux -emit-llvm %s -fopenmp-is-device -fopenmp-host-ir-file-path %t-host.bc -o - | FileCheck %s
+// RUN: %clang_cc1 -verify -fopenmp -x c++ -triple nvptx64-unknown-unknown -aux-triple x86_64-unknown-linux -fopenmp-targets=nvptx64-nvidia-cuda -emit-llvm %s -fopenmp-is-device -fopenmp-host-ir-file-path %t-host.bc -o - | FileCheck %s
 // RUN: %clang_cc1 -verify -fopenmp -x c++ -triple powerpc64le-unknown-linux-gnu -fopenmp-targets=nvptx64-nvidia-cuda -emit-llvm-bc %s -o %t-host.bc
-// RUN: %clang_cc1 -verify -fopenmp -x c++ -triple nvptx64-unknown-unknown -aux-triple powerpc64le-unknown-linux-gnu -fopenmp-targets=nvptx64-nvidia-cuda -aux-triple x86_64-unknown-linux -emit-llvm %s -fopenmp-is-device -fopenmp-host-ir-file-path %t-host.bc -o - | FileCheck %s
+// RUN: %clang_cc1 -verify -fopenmp -x c++ -triple nvptx64-unknown-unknown -aux-triple powerpc64le-unknown-linux-gnu -fopenmp-targets=nvptx64-nvidia-cuda -emit-llvm %s -fopenmp-is-device -fopenmp-host-ir-file-path %t-host.bc -o - | FileCheck %s
 // expected-no-diagnostics
 
-// CHECK-DAG: [[T:%.+]] = type {{.+}}, fp128,
+// CHECK-DAG: [[T:%.+]] = type {{.+}}, {{fp128|ppc_fp128}},
 // CHECK-DAG: [[T1:%.+]] = type {{.+}}, i128, i128,
 
 #ifndef _ARCH_PPC
@@ -34,18 +34,18 @@ struct T1 {
 #pragma omp declare target
 T a = T();
 T f = a;
-// CHECK: define{{ dso_local | }}void @{{.+}}foo{{.+}}([[T]]* byval([[T]]) align {{.+}})
+// CHECK: define{{ hidden | }}void @{{.+}}foo{{.+}}([[T]]* byval([[T]]) align {{.+}})
 void foo(T a = T()) {
   return;
 }
-// CHECK: define{{ dso_local | }}[6 x i64] @{{.+}}bar{{.+}}()
+// CHECK: define{{ hidden | }}[6 x i64] @{{.+}}bar{{.+}}()
 T bar() {
 // CHECK:      bitcast [[T]]* %{{.+}} to [6 x i64]*
 // CHECK-NEXT: load [6 x i64], [6 x i64]* %{{.+}},
 // CHECK-NEXT: ret [6 x i64]
   return T();
 }
-// CHECK: define{{ dso_local | }}void @{{.+}}baz{{.+}}()
+// CHECK: define{{ hidden | }}void @{{.+}}baz{{.+}}()
 void baz() {
 // CHECK:      call [6 x i64] @{{.+}}bar{{.+}}()
 // CHECK-NEXT: bitcast [[T]]* %{{.+}} to [6 x i64]*
@@ -54,17 +54,17 @@ void baz() {
 }
 T1 a1 = T1();
 T1 f1 = a1;
-// CHECK: define{{ dso_local | }}void @{{.+}}foo1{{.+}}([[T1]]* byval([[T1]]) align {{.+}})
+// CHECK: define{{ hidden | }}void @{{.+}}foo1{{.+}}([[T1]]* byval([[T1]]) align {{.+}})
 void foo1(T1 a = T1()) {
   return;
 }
-// CHECK: define{{ dso_local | }}[[T1]] @{{.+}}bar1{{.+}}()
+// CHECK: define{{ hidden | }}[[T1]] @{{.+}}bar1{{.+}}()
 T1 bar1() {
 // CHECK:      load [[T1]], [[T1]]*
 // CHECK-NEXT: ret [[T1]]
   return T1();
 }
-// CHECK: define{{ dso_local | }}void @{{.+}}baz1{{.+}}()
+// CHECK: define{{ hidden | }}void @{{.+}}baz1{{.+}}()
 void baz1() {
 // CHECK: call [[T1]] @{{.+}}bar1{{.+}}()
   T1 t = bar1();
@@ -78,4 +78,4 @@ BIGTYPE foo(BIGTYPE f) {
 }
 
 // CHECK: define weak void @__omp_offloading_{{.+}}foo{{.+}}_l75([[BIGTYPE:.+]]*
-// CHECK: store [[BIGTYPE]] 0xL00000000000000003FFF000000000000, [[BIGTYPE]]* %
+// CHECK: store [[BIGTYPE]] {{0xL00000000000000003FFF000000000000|0xM3FF00000000000000000000000000000}}, [[BIGTYPE]]* %

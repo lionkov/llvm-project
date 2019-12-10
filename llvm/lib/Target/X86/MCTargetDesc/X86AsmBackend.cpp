@@ -12,6 +12,8 @@
 #include "llvm/BinaryFormat/ELF.h"
 #include "llvm/BinaryFormat/MachO.h"
 #include "llvm/MC/MCAsmBackend.h"
+#include "llvm/MC/MCAssembler.h"
+#include "llvm/MC/MCContext.h"
 #include "llvm/MC/MCDwarf.h"
 #include "llvm/MC/MCELFObjectWriter.h"
 #include "llvm/MC/MCExpr.h"
@@ -22,6 +24,7 @@
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/MC/MCSectionMachO.h"
 #include "llvm/MC/MCSubtargetInfo.h"
+#include "llvm/MC/MCValue.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 using namespace llvm;
@@ -114,12 +117,24 @@ public:
 
     assert(Fixup.getOffset() + Size <= Data.size() && "Invalid fixup offset!");
 
-    // Check that uppper bits are either all zeros or all ones.
-    // Specifically ignore overflow/underflow as long as the leakage is
-    // limited to the lower bits. This is to remain compatible with
-    // other assemblers.
-    assert((Size == 0 || isIntN(Size * 8 + 1, Value)) &&
-           "Value does not fit in the Fixup field");
+    int64_t SignedValue = static_cast<int64_t>(Value);
+    if ((Target.isAbsolute() || IsResolved) &&
+        getFixupKindInfo(Fixup.getKind()).Flags &
+            MCFixupKindInfo::FKF_IsPCRel) {
+      // check that PC relative fixup fits into the fixup size.
+      if (Size > 0 && !isIntN(Size * 8, SignedValue))
+        Asm.getContext().reportError(
+            Fixup.getLoc(), "value of " + Twine(SignedValue) +
+                                " is too large for field of " + Twine(Size) +
+                                ((Size == 1) ? " byte." : " bytes."));
+    } else {
+      // Check that uppper bits are either all zeros or all ones.
+      // Specifically ignore overflow/underflow as long as the leakage is
+      // limited to the lower bits. This is to remain compatible with
+      // other assemblers.
+      assert((Size == 0 || isIntN(Size * 8 + 1, SignedValue)) &&
+             "Value does not fit in the Fixup field");
+    }
 
     for (unsigned i = 0; i != Size; ++i)
       Data[Fixup.getOffset() + i] = uint8_t(Value >> (i * 8));
@@ -287,7 +302,7 @@ bool X86AsmBackend::fixupNeedsRelaxation(const MCFixup &Fixup,
                                          const MCRelaxableFragment *DF,
                                          const MCAsmLayout &Layout) const {
   // Relax if the value is too big for a (signed) i8.
-  return int64_t(Value) != int64_t(int8_t(Value));
+  return !isInt<8>(Value);
 }
 
 // FIXME: Can tblgen help at all here to verify there aren't other instructions
@@ -557,7 +572,7 @@ protected:
 
         // If the frame pointer is other than esp/rsp, we do not have a way to
         // generate a compact unwinding representation, so bail out.
-        if (MRI.getLLVMRegNum(Inst.getRegister(), true) !=
+        if (*MRI.getLLVMRegNum(Inst.getRegister(), true) !=
             (Is64Bit ? X86::RBP : X86::EBP))
           return 0;
 
@@ -605,7 +620,7 @@ protected:
           // unwind encoding.
           return CU::UNWIND_MODE_DWARF;
 
-        unsigned Reg = MRI.getLLVMRegNum(Inst.getRegister(), true);
+        unsigned Reg = *MRI.getLLVMRegNum(Inst.getRegister(), true);
         SavedRegs[SavedRegIdx++] = Reg;
         StackAdjust += OffsetSize;
         InstrOffset += PushInstrSize(Reg);

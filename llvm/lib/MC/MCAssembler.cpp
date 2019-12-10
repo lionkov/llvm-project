@@ -30,6 +30,7 @@
 #include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCSymbol.h"
 #include "llvm/MC/MCValue.h"
+#include "llvm/Support/Alignment.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -67,10 +68,6 @@ STATISTIC(FragmentLayouts, "Number of fragment layouts");
 STATISTIC(ObjectBytes, "Number of emitted object file bytes");
 STATISTIC(RelaxationSteps, "Number of assembler layout and relaxation steps");
 STATISTIC(RelaxedInstructions, "Number of relaxed instructions");
-STATISTIC(PaddingFragmentsRelaxations,
-          "Number of Padding Fragments relaxations");
-STATISTIC(PaddingFragmentsBytes,
-          "Total size of all padding from adding Fragments");
 
 } // end namespace stats
 } // end anonymous namespace
@@ -312,16 +309,13 @@ uint64_t MCAssembler::computeFragmentSize(const MCAsmLayout &Layout,
   case MCFragment::FT_LEB:
     return cast<MCLEBFragment>(F).getContents().size();
 
-  case MCFragment::FT_Padding:
-    return cast<MCPaddingFragment>(F).getSize();
-
   case MCFragment::FT_SymbolId:
     return 4;
 
   case MCFragment::FT_Align: {
     const MCAlignFragment &AF = cast<MCAlignFragment>(F);
     unsigned Offset = Layout.getFragmentOffset(&AF);
-    unsigned Size = OffsetToAlignment(Offset, AF.getAlignment());
+    unsigned Size = offsetToAlignment(Offset, Align(AF.getAlignment()));
 
     // Insert extra Nops for code alignment if the target define
     // shouldInsertExtraNopBytesForCodeAlign target hook.
@@ -611,13 +605,6 @@ static void writeFragment(raw_ostream &OS, const MCAssembler &Asm,
     break;
   }
 
-  case MCFragment::FT_Padding: {
-    if (!Asm.getBackend().writeNopData(OS, FragmentSize))
-      report_fatal_error("unable to write nop sequence of " +
-                         Twine(FragmentSize) + " bytes");
-    break;
-  }
-
   case MCFragment::FT_SymbolId: {
     const MCSymbolIdFragment &SF = cast<MCSymbolIdFragment>(F);
     support::endian::write<uint32_t>(OS, SF.getSymbol()->getIndex(), Endian);
@@ -840,6 +827,10 @@ void MCAssembler::layout(MCAsmLayout &Layout) {
           getBackend().shouldInsertFixupForCodeAlign(*this, Layout, *AF);
         }
         continue;
+      } else if (auto *FragWithFixups =
+                     dyn_cast<MCDwarfCallFrameFragment>(&Frag)) {
+        Fixups = FragWithFixups->getFixups();
+        Contents = FragWithFixups->getContents();
       } else
         llvm_unreachable("Unknown fragment with fixups!");
       for (const MCFixup &Fixup : Fixups) {
@@ -930,20 +921,6 @@ bool MCAssembler::relaxInstruction(MCAsmLayout &Layout,
   return true;
 }
 
-bool MCAssembler::relaxPaddingFragment(MCAsmLayout &Layout,
-                                       MCPaddingFragment &PF) {
-  assert(getBackendPtr() && "Expected assembler backend");
-  uint64_t OldSize = PF.getSize();
-  if (!getBackend().relaxFragment(&PF, Layout))
-    return false;
-  uint64_t NewSize = PF.getSize();
-
-  ++stats::PaddingFragmentsRelaxations;
-  stats::PaddingFragmentsBytes += NewSize;
-  stats::PaddingFragmentsBytes -= OldSize;
-  return true;
-}
-
 bool MCAssembler::relaxLEB(MCAsmLayout &Layout, MCLEBFragment &LF) {
   uint64_t OldSize = LF.getContents().size();
   int64_t Value;
@@ -969,13 +946,9 @@ bool MCAssembler::relaxDwarfLineAddr(MCAsmLayout &Layout,
   MCContext &Context = Layout.getAssembler().getContext();
   uint64_t OldSize = DF.getContents().size();
   int64_t AddrDelta;
-  bool Abs;
-  if (getBackend().requiresDiffExpressionRelocations())
-    Abs = DF.getAddrDelta().evaluateAsAbsolute(AddrDelta, Layout);
-  else {
-    Abs = DF.getAddrDelta().evaluateKnownAbsolute(AddrDelta, Layout);
-    assert(Abs && "We created a line delta with an invalid expression");
-  }
+  bool Abs = DF.getAddrDelta().evaluateKnownAbsolute(AddrDelta, Layout);
+  assert(Abs && "We created a line delta with an invalid expression");
+  (void)Abs;
   int64_t LineDelta;
   LineDelta = DF.getLineDelta();
   SmallVectorImpl<char> &Data = DF.getContents();
@@ -983,7 +956,7 @@ bool MCAssembler::relaxDwarfLineAddr(MCAsmLayout &Layout,
   raw_svector_ostream OSE(Data);
   DF.getFixups().clear();
 
-  if (Abs) {
+  if (!getBackend().requiresDiffExpressionRelocations()) {
     MCDwarfLineAddr::Encode(Context, getDWARFLinetableParams(), LineDelta,
                             AddrDelta, OSE);
   } else {
@@ -1017,10 +990,25 @@ bool MCAssembler::relaxDwarfCallFrameFragment(MCAsmLayout &Layout,
   bool Abs = DF.getAddrDelta().evaluateKnownAbsolute(AddrDelta, Layout);
   assert(Abs && "We created call frame with an invalid expression");
   (void) Abs;
-  SmallString<8> &Data = DF.getContents();
+  SmallVectorImpl<char> &Data = DF.getContents();
   Data.clear();
   raw_svector_ostream OSE(Data);
-  MCDwarfFrameEmitter::EncodeAdvanceLoc(Context, AddrDelta, OSE);
+  DF.getFixups().clear();
+
+  if (getBackend().requiresDiffExpressionRelocations()) {
+    uint32_t Offset;
+    uint32_t Size;
+    MCDwarfFrameEmitter::EncodeAdvanceLoc(Context, AddrDelta, OSE, &Offset,
+                                          &Size);
+    if (Size) {
+      DF.getFixups().push_back(MCFixup::create(
+          Offset, &DF.getAddrDelta(),
+          MCFixup::getKindForSizeInBits(Size /*In bits.*/, false /*isPCRel*/)));
+    }
+  } else {
+    MCDwarfFrameEmitter::EncodeAdvanceLoc(Context, AddrDelta, OSE);
+  }
+
   return OldSize != Data.size();
 }
 
@@ -1068,9 +1056,6 @@ bool MCAssembler::layoutSectionOnce(MCAsmLayout &Layout, MCSection &Sec) {
       break;
     case MCFragment::FT_LEB:
       RelaxedFrag = relaxLEB(Layout, *cast<MCLEBFragment>(I));
-      break;
-    case MCFragment::FT_Padding:
-      RelaxedFrag = relaxPaddingFragment(Layout, *cast<MCPaddingFragment>(I));
       break;
     case MCFragment::FT_CVInlineLines:
       RelaxedFrag =

@@ -14,6 +14,7 @@
 #include "RISCV.h"
 #include "RISCVSubtarget.h"
 #include "RISCVTargetMachine.h"
+#include "Utils/RISCVMatInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -28,8 +29,9 @@
 
 using namespace llvm;
 
-RISCVInstrInfo::RISCVInstrInfo()
-    : RISCVGenInstrInfo(RISCV::ADJCALLSTACKDOWN, RISCV::ADJCALLSTACKUP) {}
+RISCVInstrInfo::RISCVInstrInfo(RISCVSubtarget &STI)
+    : RISCVGenInstrInfo(RISCV::ADJCALLSTACKDOWN, RISCV::ADJCALLSTACKUP),
+      STI(STI) {}
 
 unsigned RISCVInstrInfo::isLoadFromStackSlot(const MachineInstr &MI,
                                              int &FrameIndex) const {
@@ -82,8 +84,8 @@ unsigned RISCVInstrInfo::isStoreToStackSlot(const MachineInstr &MI,
 
 void RISCVInstrInfo::copyPhysReg(MachineBasicBlock &MBB,
                                  MachineBasicBlock::iterator MBBI,
-                                 const DebugLoc &DL, unsigned DstReg,
-                                 unsigned SrcReg, bool KillSrc) const {
+                                 const DebugLoc &DL, MCRegister DstReg,
+                                 MCRegister SrcReg, bool KillSrc) const {
   if (RISCV::GPRRegClass.contains(DstReg, SrcReg)) {
     BuildMI(MBB, MBBI, DL, get(RISCV::ADDI), DstReg)
         .addReg(SrcReg, getKillRegState(KillSrc))
@@ -156,24 +158,43 @@ void RISCVInstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
   BuildMI(MBB, I, DL, get(Opcode), DstReg).addFrameIndex(FI).addImm(0);
 }
 
-void RISCVInstrInfo::movImm32(MachineBasicBlock &MBB,
-                              MachineBasicBlock::iterator MBBI,
-                              const DebugLoc &DL, unsigned DstReg, uint64_t Val,
-                              MachineInstr::MIFlag Flag) const {
-  assert(isInt<32>(Val) && "Can only materialize 32-bit constants");
+void RISCVInstrInfo::movImm(MachineBasicBlock &MBB,
+                            MachineBasicBlock::iterator MBBI,
+                            const DebugLoc &DL, Register DstReg, uint64_t Val,
+                            MachineInstr::MIFlag Flag) const {
+  MachineFunction *MF = MBB.getParent();
+  MachineRegisterInfo &MRI = MF->getRegInfo();
+  bool IsRV64 = MF->getSubtarget<RISCVSubtarget>().is64Bit();
+  Register SrcReg = RISCV::X0;
+  Register Result = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+  unsigned Num = 0;
 
-  // TODO: If the value can be materialized using only one instruction, only
-  // insert a single instruction.
+  if (!IsRV64 && !isInt<32>(Val))
+    report_fatal_error("Should only materialize 32-bit constants for RV32");
 
-  uint64_t Hi20 = ((Val + 0x800) >> 12) & 0xfffff;
-  uint64_t Lo12 = SignExtend64<12>(Val);
-  BuildMI(MBB, MBBI, DL, get(RISCV::LUI), DstReg)
-      .addImm(Hi20)
-      .setMIFlag(Flag);
-  BuildMI(MBB, MBBI, DL, get(RISCV::ADDI), DstReg)
-      .addReg(DstReg, RegState::Kill)
-      .addImm(Lo12)
-      .setMIFlag(Flag);
+  RISCVMatInt::InstSeq Seq;
+  RISCVMatInt::generateInstSeq(Val, IsRV64, Seq);
+  assert(Seq.size() > 0);
+
+  for (RISCVMatInt::Inst &Inst : Seq) {
+    // Write the final result to DstReg if it's the last instruction in the Seq.
+    // Otherwise, write the result to the temp register.
+    if (++Num == Seq.size())
+      Result = DstReg;
+
+    if (Inst.Opc == RISCV::LUI) {
+      BuildMI(MBB, MBBI, DL, get(RISCV::LUI), Result)
+          .addImm(Inst.Imm)
+          .setMIFlag(Flag);
+    } else {
+      BuildMI(MBB, MBBI, DL, get(Inst.Opc), Result)
+          .addReg(SrcReg, RegState::Kill)
+          .addImm(Inst.Imm)
+          .setMIFlag(Flag);
+    }
+    // Only the first instruction has X0 as its source.
+    SrcReg = Result;
+  }
 }
 
 // The contents of values added to Cond are not examined outside of
@@ -290,9 +311,9 @@ unsigned RISCVInstrInfo::removeBranch(MachineBasicBlock &MBB,
     return 0;
 
   // Remove the branch.
-  I->eraseFromParent();
   if (BytesRemoved)
     *BytesRemoved += getInstSizeInBytes(*I);
+  I->eraseFromParent();
 
   I = MBB.end();
 
@@ -303,9 +324,9 @@ unsigned RISCVInstrInfo::removeBranch(MachineBasicBlock &MBB,
     return 1;
 
   // Remove the branch.
-  I->eraseFromParent();
   if (BytesRemoved)
     *BytesRemoved += getInstSizeInBytes(*I);
+  I->eraseFromParent();
   return 2;
 }
 
@@ -372,7 +393,7 @@ unsigned RISCVInstrInfo::insertIndirectBranch(MachineBasicBlock &MBB,
   // FIXME: A virtual register must be used initially, as the register
   // scavenger won't work with empty blocks (SIInstrInfo::insertIndirectBranch
   // uses the same workaround).
-  unsigned ScratchReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
+  Register ScratchReg = MRI.createVirtualRegister(&RISCV::GPRRegClass);
   auto II = MBB.end();
 
   MachineInstr &LuiMI = *BuildMI(MBB, II, DL, get(RISCV::LUI), ScratchReg)
@@ -465,4 +486,139 @@ bool RISCVInstrInfo::isAsCheapAsAMove(const MachineInstr &MI) const {
       return (MI.getOperand(1).isReg() && MI.getOperand(1).getReg() == RISCV::X0);
   }
   return MI.isAsCheapAsAMove();
+}
+
+bool RISCVInstrInfo::verifyInstruction(const MachineInstr &MI,
+                                       StringRef &ErrInfo) const {
+  const MCInstrInfo *MCII = STI.getInstrInfo();
+  MCInstrDesc const &Desc = MCII->get(MI.getOpcode());
+
+  for (auto &OI : enumerate(Desc.operands())) {
+    unsigned OpType = OI.value().OperandType;
+    if (OpType >= RISCVOp::OPERAND_FIRST_RISCV_IMM &&
+        OpType <= RISCVOp::OPERAND_LAST_RISCV_IMM) {
+      const MachineOperand &MO = MI.getOperand(OI.index());
+      if (MO.isImm()) {
+        int64_t Imm = MO.getImm();
+        bool Ok;
+        switch (OpType) {
+        default:
+          llvm_unreachable("Unexpected operand type");
+        case RISCVOp::OPERAND_UIMM4:
+          Ok = isUInt<4>(Imm);
+          break;
+        case RISCVOp::OPERAND_UIMM5:
+          Ok = isUInt<5>(Imm);
+          break;
+        case RISCVOp::OPERAND_UIMM12:
+          Ok = isUInt<12>(Imm);
+          break;
+        case RISCVOp::OPERAND_SIMM12:
+          Ok = isInt<12>(Imm);
+          break;
+        case RISCVOp::OPERAND_SIMM13_LSB0:
+          Ok = isShiftedInt<12, 1>(Imm);
+          break;
+        case RISCVOp::OPERAND_UIMM20:
+          Ok = isUInt<20>(Imm);
+          break;
+        case RISCVOp::OPERAND_SIMM21_LSB0:
+          Ok = isShiftedInt<20, 1>(Imm);
+          break;
+        case RISCVOp::OPERAND_UIMMLOG2XLEN:
+          if (STI.getTargetTriple().isArch64Bit())
+            Ok = isUInt<6>(Imm);
+          else
+            Ok = isUInt<5>(Imm);
+          break;
+        }
+        if (!Ok) {
+          ErrInfo = "Invalid immediate";
+          return false;
+        }
+      }
+    }
+  }
+
+  return true;
+}
+
+// Return true if get the base operand, byte offset of an instruction and the
+// memory width. Width is the size of memory that is being loaded/stored.
+bool RISCVInstrInfo::getMemOperandWithOffsetWidth(
+    const MachineInstr &LdSt, const MachineOperand *&BaseReg, int64_t &Offset,
+    unsigned &Width, const TargetRegisterInfo *TRI) const {
+  assert(LdSt.mayLoadOrStore() && "Expected a memory operation.");
+
+  // Here we assume the standard RISC-V ISA, which uses a base+offset
+  // addressing mode. You'll need to relax these conditions to support custom
+  // load/stores instructions.
+  if (LdSt.getNumExplicitOperands() != 3)
+    return false;
+  if (!LdSt.getOperand(1).isReg() || !LdSt.getOperand(2).isImm())
+    return false;
+
+  if (!LdSt.hasOneMemOperand())
+    return false;
+
+  Width = (*LdSt.memoperands_begin())->getSize();
+  BaseReg = &LdSt.getOperand(1);
+  Offset = LdSt.getOperand(2).getImm();
+  return true;
+}
+
+bool RISCVInstrInfo::areMemAccessesTriviallyDisjoint(
+    const MachineInstr &MIa, const MachineInstr &MIb) const {
+  assert(MIa.mayLoadOrStore() && "MIa must be a load or store.");
+  assert(MIb.mayLoadOrStore() && "MIb must be a load or store.");
+
+  if (MIa.hasUnmodeledSideEffects() || MIb.hasUnmodeledSideEffects() ||
+      MIa.hasOrderedMemoryRef() || MIb.hasOrderedMemoryRef())
+    return false;
+
+  // Retrieve the base register, offset from the base register and width. Width
+  // is the size of memory that is being loaded/stored (e.g. 1, 2, 4).  If
+  // base registers are identical, and the offset of a lower memory access +
+  // the width doesn't overlap the offset of a higher memory access,
+  // then the memory accesses are different.
+  const TargetRegisterInfo *TRI = STI.getRegisterInfo();
+  const MachineOperand *BaseOpA = nullptr, *BaseOpB = nullptr;
+  int64_t OffsetA = 0, OffsetB = 0;
+  unsigned int WidthA = 0, WidthB = 0;
+  if (getMemOperandWithOffsetWidth(MIa, BaseOpA, OffsetA, WidthA, TRI) &&
+      getMemOperandWithOffsetWidth(MIb, BaseOpB, OffsetB, WidthB, TRI)) {
+    if (BaseOpA->isIdenticalTo(*BaseOpB)) {
+      int LowOffset = std::min(OffsetA, OffsetB);
+      int HighOffset = std::max(OffsetA, OffsetB);
+      int LowWidth = (LowOffset == OffsetA) ? WidthA : WidthB;
+      if (LowOffset + LowWidth <= HighOffset)
+        return true;
+    }
+  }
+  return false;
+}
+
+std::pair<unsigned, unsigned>
+RISCVInstrInfo::decomposeMachineOperandsTargetFlags(unsigned TF) const {
+  const unsigned Mask = RISCVII::MO_DIRECT_FLAG_MASK;
+  return std::make_pair(TF & Mask, TF & ~Mask);
+}
+
+ArrayRef<std::pair<unsigned, const char *>>
+RISCVInstrInfo::getSerializableDirectMachineOperandTargetFlags() const {
+  using namespace RISCVII;
+  static const std::pair<unsigned, const char *> TargetFlags[] = {
+      {MO_CALL, "riscv-call"},
+      {MO_PLT, "riscv-plt"},
+      {MO_LO, "riscv-lo"},
+      {MO_HI, "riscv-hi"},
+      {MO_PCREL_LO, "riscv-pcrel-lo"},
+      {MO_PCREL_HI, "riscv-pcrel-hi"},
+      {MO_GOT_HI, "riscv-got-hi"},
+      {MO_TPREL_LO, "riscv-tprel-lo"},
+      {MO_TPREL_HI, "riscv-tprel-hi"},
+      {MO_TPREL_ADD, "riscv-tprel-add"},
+      {MO_TLS_GOT_HI, "riscv-tls-got-hi"},
+      {MO_TLS_GD_HI, "riscv-tls-gd-hi"}};
+  return makeArrayRef(TargetFlags);
 }

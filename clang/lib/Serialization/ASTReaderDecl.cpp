@@ -50,14 +50,14 @@
 #include "clang/Serialization/ASTBitCodes.h"
 #include "clang/Serialization/ASTReader.h"
 #include "clang/Serialization/ContinuousRangeMap.h"
-#include "clang/Serialization/Module.h"
+#include "clang/Serialization/ModuleFile.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/FoldingSet.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/iterator_range.h"
-#include "llvm/Bitcode/BitstreamReader.h"
+#include "llvm/Bitstream/BitstreamReader.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/SaveAndRestore.h"
@@ -382,6 +382,7 @@ namespace clang {
     void VisitBindingDecl(BindingDecl *BD);
     void VisitNonTypeTemplateParmDecl(NonTypeTemplateParmDecl *D);
     DeclID VisitTemplateDecl(TemplateDecl *D);
+    void VisitConceptDecl(ConceptDecl *D);
     RedeclarableResult VisitRedeclarableTemplateDecl(RedeclarableTemplateDecl *D);
     void VisitClassTemplateDecl(ClassTemplateDecl *D);
     void VisitBuiltinTemplateDecl(BuiltinTemplateDecl *D);
@@ -404,6 +405,7 @@ namespace clang {
     void VisitBlockDecl(BlockDecl *BD);
     void VisitCapturedDecl(CapturedDecl *CD);
     void VisitEmptyDecl(EmptyDecl *D);
+    void VisitLifetimeExtendedTemporaryDecl(LifetimeExtendedTemporaryDecl *D);
 
     std::pair<uint64_t, uint64_t> VisitDeclContext(DeclContext *DC);
 
@@ -421,6 +423,8 @@ namespace clang {
 
     template<typename T>
     void mergeMergeable(Mergeable<T> *D);
+
+    void mergeMergeable(LifetimeExtendedTemporaryDecl *D);
 
     void mergeTemplatePattern(RedeclarableTemplateDecl *D,
                               RedeclarableTemplateDecl *Existing,
@@ -793,6 +797,9 @@ ASTDeclReader::VisitRecordDeclImpl(RecordDecl *RD) {
   RD->setNonTrivialToPrimitiveDefaultInitialize(Record.readInt());
   RD->setNonTrivialToPrimitiveCopy(Record.readInt());
   RD->setNonTrivialToPrimitiveDestroy(Record.readInt());
+  RD->setHasNonTrivialToPrimitiveDefaultInitializeCUnion(Record.readInt());
+  RD->setHasNonTrivialToPrimitiveDestructCUnion(Record.readInt());
+  RD->setHasNonTrivialToPrimitiveCopyCUnion(Record.readInt());
   RD->setParamDestroyedInCallee(Record.readInt());
   RD->setArgPassingRestrictions((RecordDecl::ArgPassingKind)Record.readInt());
   return Redecl;
@@ -879,6 +886,20 @@ void ASTDeclReader::VisitFunctionDecl(FunctionDecl *FD) {
 
   FD->ODRHash = Record.readInt();
   FD->setHasODRHash(true);
+  FD->setUsesFPIntrin(Record.readInt());
+
+  if (FD->isDefaulted()) {
+    if (unsigned NumLookups = Record.readInt()) {
+      SmallVector<DeclAccessPair, 8> Lookups;
+      for (unsigned I = 0; I != NumLookups; ++I) {
+        NamedDecl *ND = Record.readDeclAs<NamedDecl>();
+        AccessSpecifier AS = (AccessSpecifier)Record.readInt();
+        Lookups.push_back(DeclAccessPair::make(ND, AS));
+      }
+      FD->setDefaultedFunctionInfo(FunctionDecl::DefaultedFunctionInfo::Create(
+          Reader.getContext(), Lookups));
+    }
+  }
 
   switch ((FunctionDecl::TemplatedKind)Record.readInt()) {
   case FunctionDecl::TK_NonTemplate:
@@ -1009,12 +1030,13 @@ void ASTDeclReader::VisitObjCMethodDecl(ObjCMethodDecl *MD) {
     // definitions rarely show up in headers.
     Reader.PendingBodies[MD] = GetCurrentCursorOffset();
     HasPendingBody = true;
-    MD->setSelfDecl(ReadDeclAs<ImplicitParamDecl>());
-    MD->setCmdDecl(ReadDeclAs<ImplicitParamDecl>());
   }
+  MD->setSelfDecl(ReadDeclAs<ImplicitParamDecl>());
+  MD->setCmdDecl(ReadDeclAs<ImplicitParamDecl>());
   MD->setInstanceMethod(Record.readInt());
   MD->setVariadic(Record.readInt());
   MD->setPropertyAccessor(Record.readInt());
+  MD->setSynthesizedAccessorStub(Record.readInt());
   MD->setDefined(Record.readInt());
   MD->setOverriding(Record.readInt());
   MD->setHasSkippedBody(Record.readInt());
@@ -1309,6 +1331,8 @@ void ASTDeclReader::VisitObjCPropertyImplDecl(ObjCPropertyImplDecl *D) {
   D->setPropertyDecl(ReadDeclAs<ObjCPropertyDecl>());
   D->PropertyIvarDecl = ReadDeclAs<ObjCIvarDecl>();
   D->IvarLoc = ReadSourceLocation();
+  D->setGetterMethodDecl(ReadDeclAs<ObjCMethodDecl>());
+  D->setSetterMethodDecl(ReadDeclAs<ObjCMethodDecl>());
   D->setGetterCXXConstructor(Record.readExpr());
   D->setSetterCXXAssignment(Record.readExpr());
 }
@@ -1386,10 +1410,11 @@ ASTDeclReader::RedeclarableResult ASTDeclReader::VisitVarDeclImpl(VarDecl *VD) {
 
   if (uint64_t Val = Record.readInt()) {
     VD->setInit(Record.readExpr());
-    if (Val > 1) { // IsInitKnownICE = 1, IsInitNotICE = 2, IsInitICE = 3
+    if (Val > 1) {
       EvaluatedStmt *Eval = VD->ensureEvaluatedStmt();
       Eval->CheckedICE = true;
-      Eval->IsICE = Val == 3;
+      Eval->IsICE = (Val & 1) != 0;
+      Eval->HasConstantDestruction = (Val & 4) != 0;
     }
   }
 
@@ -1651,55 +1676,11 @@ void ASTDeclReader::VisitUnresolvedUsingTypenameDecl(
 
 void ASTDeclReader::ReadCXXDefinitionData(
     struct CXXRecordDecl::DefinitionData &Data, const CXXRecordDecl *D) {
+  #define FIELD(Name, Width, Merge) \
+  Data.Name = Record.readInt();
+  #include "clang/AST/CXXRecordDeclDefinitionBits.def"
+
   // Note: the caller has deserialized the IsLambda bit already.
-  Data.UserDeclaredConstructor = Record.readInt();
-  Data.UserDeclaredSpecialMembers = Record.readInt();
-  Data.Aggregate = Record.readInt();
-  Data.PlainOldData = Record.readInt();
-  Data.Empty = Record.readInt();
-  Data.Polymorphic = Record.readInt();
-  Data.Abstract = Record.readInt();
-  Data.IsStandardLayout = Record.readInt();
-  Data.IsCXX11StandardLayout = Record.readInt();
-  Data.HasBasesWithFields = Record.readInt();
-  Data.HasBasesWithNonStaticDataMembers = Record.readInt();
-  Data.HasPrivateFields = Record.readInt();
-  Data.HasProtectedFields = Record.readInt();
-  Data.HasPublicFields = Record.readInt();
-  Data.HasMutableFields = Record.readInt();
-  Data.HasVariantMembers = Record.readInt();
-  Data.HasOnlyCMembers = Record.readInt();
-  Data.HasInClassInitializer = Record.readInt();
-  Data.HasUninitializedReferenceMember = Record.readInt();
-  Data.HasUninitializedFields = Record.readInt();
-  Data.HasInheritedConstructor = Record.readInt();
-  Data.HasInheritedAssignment = Record.readInt();
-  Data.NeedOverloadResolutionForCopyConstructor = Record.readInt();
-  Data.NeedOverloadResolutionForMoveConstructor = Record.readInt();
-  Data.NeedOverloadResolutionForMoveAssignment = Record.readInt();
-  Data.NeedOverloadResolutionForDestructor = Record.readInt();
-  Data.DefaultedCopyConstructorIsDeleted = Record.readInt();
-  Data.DefaultedMoveConstructorIsDeleted = Record.readInt();
-  Data.DefaultedMoveAssignmentIsDeleted = Record.readInt();
-  Data.DefaultedDestructorIsDeleted = Record.readInt();
-  Data.HasTrivialSpecialMembers = Record.readInt();
-  Data.HasTrivialSpecialMembersForCall = Record.readInt();
-  Data.DeclaredNonTrivialSpecialMembers = Record.readInt();
-  Data.DeclaredNonTrivialSpecialMembersForCall = Record.readInt();
-  Data.HasIrrelevantDestructor = Record.readInt();
-  Data.HasConstexprNonCopyMoveConstructor = Record.readInt();
-  Data.HasDefaultedDefaultConstructor = Record.readInt();
-  Data.DefaultedDefaultConstructorIsConstexpr = Record.readInt();
-  Data.HasConstexprDefaultConstructor = Record.readInt();
-  Data.HasNonLiteralTypeFieldsOrBases = Record.readInt();
-  Data.ComputedVisibleConversions = Record.readInt();
-  Data.UserProvidedDefaultConstructor = Record.readInt();
-  Data.DeclaredSpecialMembers = Record.readInt();
-  Data.ImplicitCopyConstructorCanHaveConstParamForVBase = Record.readInt();
-  Data.ImplicitCopyConstructorCanHaveConstParamForNonVBase = Record.readInt();
-  Data.ImplicitCopyAssignmentHasConstParam = Record.readInt();
-  Data.HasDeclaredCopyConstructorWithConstParam = Record.readInt();
-  Data.HasDeclaredCopyAssignmentWithConstParam = Record.readInt();
   Data.ODRHash = Record.readInt();
   Data.HasODRHash = true;
 
@@ -1714,7 +1695,9 @@ void ASTDeclReader::ReadCXXDefinitionData(
     Data.VBases = ReadGlobalOffset();
 
   Record.readUnresolvedSet(Data.Conversions);
-  Record.readUnresolvedSet(Data.VisibleConversions);
+  Data.ComputedVisibleConversions = Record.readInt();
+  if (Data.ComputedVisibleConversions)
+    Record.readUnresolvedSet(Data.VisibleConversions);
   assert(Data.Definition && "Data.Definition should be already set!");
   Data.FirstFriend = ReadDeclID();
 
@@ -1727,6 +1710,7 @@ void ASTDeclReader::ReadCXXDefinitionData(
     Lambda.CaptureDefault = Record.readInt();
     Lambda.NumCaptures = Record.readInt();
     Lambda.NumExplicitCaptures = Record.readInt();
+    Lambda.HasKnownInternalLinkage = Record.readInt();
     Lambda.ManglingNumber = Record.readInt();
     Lambda.ContextDecl = ReadDeclID();
     Lambda.Captures = (Capture *)Reader.getContext().Allocate(
@@ -1787,63 +1771,17 @@ void ASTDeclReader::MergeDefinitionData(
     return;
   }
 
-  // FIXME: Move this out into a .def file?
   bool DetectedOdrViolation = false;
-#define OR_FIELD(Field) DD.Field |= MergeDD.Field;
-#define MATCH_FIELD(Field) \
+
+  #define FIELD(Name, Width, Merge) Merge(Name)
+  #define MERGE_OR(Field) DD.Field |= MergeDD.Field;
+  #define NO_MERGE(Field) \
     DetectedOdrViolation |= DD.Field != MergeDD.Field; \
-    OR_FIELD(Field)
-  MATCH_FIELD(UserDeclaredConstructor)
-  MATCH_FIELD(UserDeclaredSpecialMembers)
-  MATCH_FIELD(Aggregate)
-  MATCH_FIELD(PlainOldData)
-  MATCH_FIELD(Empty)
-  MATCH_FIELD(Polymorphic)
-  MATCH_FIELD(Abstract)
-  MATCH_FIELD(IsStandardLayout)
-  MATCH_FIELD(IsCXX11StandardLayout)
-  MATCH_FIELD(HasBasesWithFields)
-  MATCH_FIELD(HasBasesWithNonStaticDataMembers)
-  MATCH_FIELD(HasPrivateFields)
-  MATCH_FIELD(HasProtectedFields)
-  MATCH_FIELD(HasPublicFields)
-  MATCH_FIELD(HasMutableFields)
-  MATCH_FIELD(HasVariantMembers)
-  MATCH_FIELD(HasOnlyCMembers)
-  MATCH_FIELD(HasInClassInitializer)
-  MATCH_FIELD(HasUninitializedReferenceMember)
-  MATCH_FIELD(HasUninitializedFields)
-  MATCH_FIELD(HasInheritedConstructor)
-  MATCH_FIELD(HasInheritedAssignment)
-  MATCH_FIELD(NeedOverloadResolutionForCopyConstructor)
-  MATCH_FIELD(NeedOverloadResolutionForMoveConstructor)
-  MATCH_FIELD(NeedOverloadResolutionForMoveAssignment)
-  MATCH_FIELD(NeedOverloadResolutionForDestructor)
-  MATCH_FIELD(DefaultedCopyConstructorIsDeleted)
-  MATCH_FIELD(DefaultedMoveConstructorIsDeleted)
-  MATCH_FIELD(DefaultedMoveAssignmentIsDeleted)
-  MATCH_FIELD(DefaultedDestructorIsDeleted)
-  OR_FIELD(HasTrivialSpecialMembers)
-  OR_FIELD(HasTrivialSpecialMembersForCall)
-  OR_FIELD(DeclaredNonTrivialSpecialMembers)
-  OR_FIELD(DeclaredNonTrivialSpecialMembersForCall)
-  MATCH_FIELD(HasIrrelevantDestructor)
-  OR_FIELD(HasConstexprNonCopyMoveConstructor)
-  OR_FIELD(HasDefaultedDefaultConstructor)
-  MATCH_FIELD(DefaultedDefaultConstructorIsConstexpr)
-  OR_FIELD(HasConstexprDefaultConstructor)
-  MATCH_FIELD(HasNonLiteralTypeFieldsOrBases)
-  // ComputedVisibleConversions is handled below.
-  MATCH_FIELD(UserProvidedDefaultConstructor)
-  OR_FIELD(DeclaredSpecialMembers)
-  MATCH_FIELD(ImplicitCopyConstructorCanHaveConstParamForVBase)
-  MATCH_FIELD(ImplicitCopyConstructorCanHaveConstParamForNonVBase)
-  MATCH_FIELD(ImplicitCopyAssignmentHasConstParam)
-  OR_FIELD(HasDeclaredCopyConstructorWithConstParam)
-  OR_FIELD(HasDeclaredCopyAssignmentWithConstParam)
-  MATCH_FIELD(IsLambda)
-#undef OR_FIELD
-#undef MATCH_FIELD
+    MERGE_OR(Field)
+  #include "clang/AST/CXXRecordDeclDefinitionBits.def"
+  NO_MERGE(IsLambda)
+  #undef NO_MERGE
+  #undef MERGE_OR
 
   if (DD.NumBases != MergeDD.NumBases || DD.NumVBases != MergeDD.NumVBases)
     DetectedOdrViolation = true;
@@ -2083,10 +2021,15 @@ DeclID ASTDeclReader::VisitTemplateDecl(TemplateDecl *D) {
   DeclID PatternID = ReadDeclID();
   auto *TemplatedDecl = cast_or_null<NamedDecl>(Reader.GetDecl(PatternID));
   TemplateParameterList *TemplateParams = Record.readTemplateParameterList();
-  // FIXME handle associated constraints
   D->init(TemplatedDecl, TemplateParams);
 
   return PatternID;
+}
+
+void ASTDeclReader::VisitConceptDecl(ConceptDecl *D) {
+  VisitTemplateDecl(D);
+  D->ConstraintExpr = Record.readExpr();
+  mergeMergeable(D);
 }
 
 ASTDeclReader::RedeclarableResult
@@ -2243,7 +2186,8 @@ void ASTDeclReader::VisitClassTemplatePartialSpecializationDecl(
                                     ClassTemplatePartialSpecializationDecl *D) {
   RedeclarableResult Redecl = VisitClassTemplateSpecializationDeclImpl(D);
 
-  D->TemplateParams = Record.readTemplateParameterList();
+  TemplateParameterList *Params = Record.readTemplateParameterList();
+  D->TemplateParams = Params;
   D->ArgsAsWritten = Record.readASTTemplateArgumentListInfo();
 
   // These are read/set from/to the first declaration.
@@ -2345,7 +2289,8 @@ void ASTDeclReader::VisitVarTemplatePartialSpecializationDecl(
     VarTemplatePartialSpecializationDecl *D) {
   RedeclarableResult Redecl = VisitVarTemplateSpecializationDeclImpl(D);
 
-  D->TemplateParams = Record.readTemplateParameterList();
+  TemplateParameterList *Params = Record.readTemplateParameterList();
+  D->TemplateParams = Params;
   D->ArgsAsWritten = Record.readASTTemplateArgumentListInfo();
 
   // These are read/set from/to the first declaration.
@@ -2361,6 +2306,7 @@ void ASTDeclReader::VisitTemplateTypeParmDecl(TemplateTypeParmDecl *D) {
 
   D->setDeclaredWithTypename(Record.readInt());
 
+  // TODO: Concepts: Immediately introduced constraint
   if (Record.readInt())
     D->setDefaultArgument(GetTypeSourceInfo());
 }
@@ -2418,6 +2364,17 @@ void ASTDeclReader::VisitStaticAssertDecl(StaticAssertDecl *D) {
 
 void ASTDeclReader::VisitEmptyDecl(EmptyDecl *D) {
   VisitDecl(D);
+}
+
+void ASTDeclReader::VisitLifetimeExtendedTemporaryDecl(
+    LifetimeExtendedTemporaryDecl *D) {
+  VisitDecl(D);
+  D->ExtendingDecl = ReadDeclAs<ValueDecl>();
+  D->ExprWithTemporary = Record.readStmt();
+  if (Record.readInt())
+    D->Value = new (D->getASTContext()) APValue(Record.readAPValue());
+  D->ManglingNumber = Record.readInt();
+  mergeMergeable(D);
 }
 
 std::pair<uint64_t, uint64_t>
@@ -2615,6 +2572,25 @@ static bool allowODRLikeMergeInC(NamedDecl *ND) {
   return false;
 }
 
+/// Attempts to merge LifetimeExtendedTemporaryDecl with
+/// identical class definitions from two different modules.
+void ASTDeclReader::mergeMergeable(LifetimeExtendedTemporaryDecl *D) {
+  // If modules are not available, there is no reason to perform this merge.
+  if (!Reader.getContext().getLangOpts().Modules)
+    return;
+
+  LifetimeExtendedTemporaryDecl *LETDecl = D;
+
+  LifetimeExtendedTemporaryDecl *&LookupResult =
+      Reader.LETemporaryForMerging[std::make_pair(
+          LETDecl->getExtendingDecl(), LETDecl->getManglingNumber())];
+  if (LookupResult)
+    Reader.getContext().setPrimaryMergedDecl(LETDecl,
+                                             LookupResult->getCanonicalDecl());
+  else
+    LookupResult = LETDecl;
+}
+
 /// Attempts to merge the given declaration (D) with another declaration
 /// of the same entity, for the case where the entity is not actually
 /// redeclarable. This happens, for instance, when merging the fields of
@@ -2738,6 +2714,10 @@ public:
     return Reader->ReadSourceRange(*F, Record, Idx);
   }
 
+  SourceLocation readSourceLocation() {
+    return Reader->ReadSourceLocation(*F, Record, Idx);
+  }
+
   Expr *readExpr() { return Reader->ReadExpr(*F); }
 
   std::string readString() {
@@ -2773,8 +2753,19 @@ Attr *ASTReader::ReadAttr(ModuleFile &M, const RecordData &Rec,
   // Kind is stored as a 1-based integer because 0 is used to indicate a null
   // Attr pointer.
   auto Kind = static_cast<attr::Kind>(V - 1);
-  SourceRange Range = Record.readSourceRange();
   ASTContext &Context = getContext();
+
+  IdentifierInfo *AttrName = Record.getIdentifierInfo();
+  IdentifierInfo *ScopeName = Record.getIdentifierInfo();
+  SourceRange AttrRange = Record.readSourceRange();
+  SourceLocation ScopeLoc = Record.readSourceLocation();
+  unsigned ParsedKind = Record.readInt();
+  unsigned Syntax = Record.readInt();
+  unsigned SpellingIndex = Record.readInt();
+
+  AttributeCommonInfo Info(AttrName, ScopeName, AttrRange, ScopeLoc,
+                           AttributeCommonInfo::Kind(ParsedKind),
+                           AttributeCommonInfo::Syntax(Syntax), SpellingIndex);
 
 #include "clang/Serialization/AttrPCHRead.inc"
 
@@ -3829,6 +3820,9 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
   case DECL_TYPE_ALIAS_TEMPLATE:
     D = TypeAliasTemplateDecl::CreateDeserialized(Context, ID);
     break;
+  case DECL_CONCEPT:
+    D = ConceptDecl::CreateDeserialized(Context, ID);
+    break;
   case DECL_STATIC_ASSERT:
     D = StaticAssertDecl::CreateDeserialized(Context, ID);
     break;
@@ -3939,6 +3933,9 @@ Decl *ASTReader::ReadDeclRecord(DeclID ID) {
     break;
   case DECL_EMPTY:
     D = EmptyDecl::CreateDeserialized(Context, ID);
+    break;
+  case DECL_LIFETIME_EXTENDED_TEMPORARY:
+    D = LifetimeExtendedTemporaryDecl::CreateDeserialized(Context, ID);
     break;
   case DECL_OBJC_TYPE_PARAM:
     D = ObjCTypeParamDecl::CreateDeserialized(Context, ID);
@@ -4538,8 +4535,9 @@ void ASTDeclReader::UpdateDecl(Decl *D,
       break;
 
     case UPD_DECL_MARKED_OPENMP_THREADPRIVATE:
-      D->addAttr(OMPThreadPrivateDeclAttr::CreateImplicit(Reader.getContext(),
-                                                          ReadSourceRange()));
+      D->addAttr(OMPThreadPrivateDeclAttr::CreateImplicit(
+          Reader.getContext(), ReadSourceRange(),
+          AttributeCommonInfo::AS_Pragma));
       break;
 
     case UPD_DECL_MARKED_OPENMP_ALLOCATE: {
@@ -4548,7 +4546,8 @@ void ASTDeclReader::UpdateDecl(Decl *D,
       Expr *Allocator = Record.readExpr();
       SourceRange SR = ReadSourceRange();
       D->addAttr(OMPAllocateDeclAttr::CreateImplicit(
-          Reader.getContext(), AllocatorKind, Allocator, SR));
+          Reader.getContext(), AllocatorKind, Allocator, SR,
+          AttributeCommonInfo::AS_Pragma));
       break;
     }
 
@@ -4561,12 +4560,16 @@ void ASTDeclReader::UpdateDecl(Decl *D,
       break;
     }
 
-    case UPD_DECL_MARKED_OPENMP_DECLARETARGET:
+    case UPD_DECL_MARKED_OPENMP_DECLARETARGET: {
+      OMPDeclareTargetDeclAttr::MapTypeTy MapType =
+          static_cast<OMPDeclareTargetDeclAttr::MapTypeTy>(Record.readInt());
+      OMPDeclareTargetDeclAttr::DevTypeTy DevType =
+          static_cast<OMPDeclareTargetDeclAttr::DevTypeTy>(Record.readInt());
       D->addAttr(OMPDeclareTargetDeclAttr::CreateImplicit(
-          Reader.getContext(),
-          static_cast<OMPDeclareTargetDeclAttr::MapTypeTy>(Record.readInt()),
-          ReadSourceRange()));
+          Reader.getContext(), MapType, DevType, ReadSourceRange(),
+          AttributeCommonInfo::AS_Pragma));
       break;
+    }
 
     case UPD_ADDED_ATTR_TO_RECORD:
       AttrVec Attrs;

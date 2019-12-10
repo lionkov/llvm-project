@@ -254,7 +254,7 @@ if config.host_os == 'Darwin':
       config.available_features.add('osx-autointerception')
       config.available_features.add('osx-ld64-live_support')
     else:
-      # The ASAN initialization-bug.cc test should XFAIL on OS X systems
+      # The ASAN initialization-bug.cpp test should XFAIL on OS X systems
       # older than El Capitan. By marking the test as being unsupported with
       # this "feature", we can pass the test on newer OS X versions and other
       # platforms.
@@ -477,6 +477,9 @@ if config.asan_shadow_scale:
 else:
   config.available_features.add("shadow-scale-3")
 
+if config.expensive_checks:
+  config.available_features.add("expensive_checks")
+
 # Propagate the LLD/LTO into the clang config option, so nothing else is needed.
 run_wrapper = []
 target_cflags = [getattr(config, 'target_cflags', None)]
@@ -495,3 +498,9 @@ elif config.use_lld and (not config.has_lld):
 
 config.clang = " " + " ".join(run_wrapper + [config.compile_wrapper, config.clang]) + " "
 config.target_cflags = " " + " ".join(target_cflags + extra_cflags) + " "
+
+if config.host_os == 'NetBSD':
+  nb_commands_dir = os.path.join(config.compiler_rt_src_root,
+                                 "test", "sanitizer_common", "netbsd_commands")
+  config.netbsd_noaslr_prefix = ('sh ' +
+                                 os.path.join(nb_commands_dir, 'run_noaslr.sh'))

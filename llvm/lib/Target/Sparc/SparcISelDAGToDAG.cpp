@@ -31,7 +31,7 @@ namespace {
 class SparcDAGToDAGISel : public SelectionDAGISel {
   /// Subtarget - Keep a pointer to the Sparc Subtarget around so that we can
   /// make the right decision when generating code for different targets.
-  const SparcSubtarget *Subtarget;
+  const SparcSubtarget *Subtarget = nullptr;
 public:
   explicit SparcDAGToDAGISel(SparcTargetMachine &tm) : SelectionDAGISel(tm) {}
 
@@ -231,7 +231,7 @@ bool SparcDAGToDAGISel::tryInlineAsm(SDNode *N){
       // Replace the two GPRs with 1 GPRPair and copy values from GPRPair to
       // the original GPRs.
 
-      unsigned GPVR = MRI.createVirtualRegister(&SP::IntPairRegClass);
+      Register GPVR = MRI.createVirtualRegister(&SP::IntPairRegClass);
       PairedReg = CurDAG->getRegister(GPVR, MVT::v2i32);
       SDValue Chain = SDValue(N,0);
 
@@ -278,7 +278,7 @@ bool SparcDAGToDAGISel::tryInlineAsm(SDNode *N){
 
       // Copy REG_SEQ into a GPRPair-typed VR and replace the original two
       // i32 VRs of inline asm with it.
-      unsigned GPVR = MRI.createVirtualRegister(&SP::IntPairRegClass);
+      Register GPVR = MRI.createVirtualRegister(&SP::IntPairRegClass);
       PairedReg = CurDAG->getRegister(GPVR, MVT::v2i32);
       Chain = CurDAG->getCopyToReg(T1, dl, GPVR, Pair, T1.getValue(1));
 

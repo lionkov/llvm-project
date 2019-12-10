@@ -33,7 +33,7 @@ typedef kmp_int64 bufsize;
 #endif
 #else
 typedef ssize_t bufsize;
-#endif
+#endif // KMP_OS_WINDOWS
 
 /* The three modes of operation are, fifo search, lifo search, and best-fit */
 
@@ -1637,8 +1637,6 @@ void __kmpc_free(int gtid, void *ptr, const omp_allocator_handle_t allocator) {
   KE_TRACE(10, ("__kmpc_free: T#%d freed %p (%p)\n", gtid, desc.ptr_alloc,
                 allocator));
 }
-
-#endif
 
 /* If LEAK_MEMORY is defined, __kmp_free() will *not* free memory. It causes
    memory leaks, but it may be useful for debugging memory corruptions, used

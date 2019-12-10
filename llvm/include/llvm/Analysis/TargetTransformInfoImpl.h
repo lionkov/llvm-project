@@ -114,7 +114,11 @@ public:
   }
 
   unsigned getEstimatedNumberOfCaseClusters(const SwitchInst &SI,
-                                            unsigned &JTSize) {
+                                            unsigned &JTSize,
+                                            ProfileSummaryInfo *PSI,
+                                            BlockFrequencyInfo *BFI) {
+    (void)PSI;
+    (void)BFI;
     JTSize = 0;
     return SI.getNumCases();
   }
@@ -140,6 +144,8 @@ public:
 
   unsigned getInliningThresholdMultiplier() { return 1; }
 
+  int getInlinerVectorBonusPercent() { return 150; }
+
   unsigned getMemcpyCost(const Instruction *I) {
     return TTI::TCC_Expensive;
   }
@@ -152,6 +158,16 @@ public:
 
   unsigned getFlatAddressSpace () {
     return -1;
+  }
+
+  bool collectFlatAddressOperands(SmallVectorImpl<int> &OpIndexes,
+                                  Intrinsic::ID IID) const {
+    return false;
+  }
+
+  bool rewriteIntrinsicWithAddressSpace(IntrinsicInst *II,
+                                        Value *OldV, Value *NewV) const {
+    return false;
   }
 
   bool isLoweredToCall(const Function *F) {
@@ -197,6 +213,13 @@ public:
     return false;
   }
 
+  bool preferPredicateOverEpilogue(Loop *L, LoopInfo *LI, ScalarEvolution &SE,
+                                   AssumptionCache &AC, TargetLibraryInfo *TLI,
+                                   DominatorTree *DT,
+                                   const LoopAccessInfo *LAI) const {
+    return false;
+  }
+
   void getUnrollingPreferences(Loop *, ScalarEvolution &,
                                TTI::UnrollingPreferences &) {}
 
@@ -221,22 +244,28 @@ public:
 
   bool canMacroFuseCmp() { return false; }
 
+  bool canSaveCmp(Loop *L, BranchInst **BI, ScalarEvolution *SE, LoopInfo *LI,
+                  DominatorTree *DT, AssumptionCache *AC,
+                  TargetLibraryInfo *LibInfo) {
+    return false;
+  }
+
   bool shouldFavorPostInc() const { return false; }
 
   bool shouldFavorBackedgeIndex(const Loop *L) const { return false; }
 
-  bool isLegalMaskedStore(Type *DataType) { return false; }
+  bool isLegalMaskedStore(Type *DataType, MaybeAlign Alignment) { return false; }
 
-  bool isLegalMaskedLoad(Type *DataType) { return false; }
+  bool isLegalMaskedLoad(Type *DataType, MaybeAlign Alignment) { return false; }
 
-  bool isLegalNTStore(Type *DataType, unsigned Alignment) {
+  bool isLegalNTStore(Type *DataType, Align Alignment) {
     // By default, assume nontemporal memory stores are available for stores
     // that are aligned and have a size that is a power of 2.
     unsigned DataSize = DL.getTypeStoreSize(DataType);
     return Alignment >= DataSize && isPowerOf2_32(DataSize);
   }
 
-  bool isLegalNTLoad(Type *DataType, unsigned Alignment) {
+  bool isLegalNTLoad(Type *DataType, Align Alignment) {
     // By default, assume nontemporal memory loads are available for loads that
     // are aligned and have a size that is a power of 2.
     unsigned DataSize = DL.getTypeStoreSize(DataType);
@@ -275,10 +304,6 @@ public:
   bool useAA() { return false; }
 
   bool isTypeLegal(Type *Ty) { return false; }
-
-  unsigned getJumpBufAlignment() { return 0; }
-
-  unsigned getJumpBufSize() { return 0; }
 
   bool shouldBuildLookupTables() { return true; }
   bool shouldBuildLookupTablesForConstant(Constant *C) { return true; }
@@ -340,7 +365,20 @@ public:
     return TTI::TCC_Free;
   }
 
-  unsigned getNumberOfRegisters(bool Vector) { return 8; }
+  unsigned getNumberOfRegisters(unsigned ClassID) const { return 8; }
+
+  unsigned getRegisterClassForType(bool Vector, Type *Ty = nullptr) const {
+    return Vector ? 1 : 0;
+  };
+
+  const char* getRegisterClassName(unsigned ClassID) const {
+    switch (ClassID) {
+      default:
+        return "Generic::Unknown Register Class";
+      case 0: return "Generic::ScalarRC";
+      case 1: return "Generic::VectorRC";
+    }
+  }
 
   unsigned getRegisterBitWidth(bool Vector) const { return 32; }
 
@@ -357,21 +395,20 @@ public:
     return false;
   }
 
-  unsigned getCacheLineSize() { return 0; }
+  unsigned getCacheLineSize() const { return 0; }
 
-  llvm::Optional<unsigned> getCacheSize(TargetTransformInfo::CacheLevel Level) {
+  llvm::Optional<unsigned> getCacheSize(TargetTransformInfo::CacheLevel Level) const {
     switch (Level) {
     case TargetTransformInfo::CacheLevel::L1D:
       LLVM_FALLTHROUGH;
     case TargetTransformInfo::CacheLevel::L2D:
       return llvm::Optional<unsigned>();
     }
-
     llvm_unreachable("Unknown TargetTransformInfo::CacheLevel");
   }
 
   llvm::Optional<unsigned> getCacheAssociativity(
-    TargetTransformInfo::CacheLevel Level) {
+    TargetTransformInfo::CacheLevel Level) const {
     switch (Level) {
     case TargetTransformInfo::CacheLevel::L1D:
       LLVM_FALLTHROUGH;
@@ -382,11 +419,9 @@ public:
     llvm_unreachable("Unknown TargetTransformInfo::CacheLevel");
   }
 
-  unsigned getPrefetchDistance() { return 0; }
-
-  unsigned getMinPrefetchStride() { return 1; }
-
-  unsigned getMaxPrefetchIterationsAhead() { return UINT_MAX; }
+  unsigned getPrefetchDistance() const { return 0; }
+  unsigned getMinPrefetchStride() const { return 1; }
+  unsigned getMaxPrefetchIterationsAhead() const { return UINT_MAX; }
 
   unsigned getMaxInterleaveFactor(unsigned VF) { return 1; }
 
@@ -395,7 +430,8 @@ public:
                                   TTI::OperandValueKind Opd2Info,
                                   TTI::OperandValueProperties Opd1PropInfo,
                                   TTI::OperandValueProperties Opd2PropInfo,
-                                  ArrayRef<const Value *> Args) {
+                                  ArrayRef<const Value *> Args,
+                                  const Instruction *CxtI = nullptr) {
     return 1;
   }
 
@@ -423,7 +459,7 @@ public:
     return 1;
   }
 
-  unsigned getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
+  unsigned getMemoryOpCost(unsigned Opcode, Type *Src, MaybeAlign Alignment,
                            unsigned AddressSpace, const Instruction *I) {
     return 1;
   }
@@ -821,6 +857,9 @@ public:
   unsigned getUserCost(const User *U, ArrayRef<const Value *> Operands) {
     if (isa<PHINode>(U))
       return TTI::TCC_Free; // Model all PHI nodes as free.
+
+    if (isa<ExtractValueInst>(U))
+      return TTI::TCC_Free; // Model all ExtractValue nodes as free.
 
     // Static alloca doesn't generate target instructions.
     if (auto *A = dyn_cast<AllocaInst>(U))

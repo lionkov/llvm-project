@@ -22,7 +22,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Twine.h"
 #include "llvm/Bitcode/BitcodeReader.h"
-#include "llvm/Bitcode/BitstreamReader.h"
+#include "llvm/Bitstream/BitstreamReader.h"
 #include "llvm/Bitcode/LLVMBitCodes.h"
 #include "llvm/IR/Argument.h"
 #include "llvm/IR/Attributes.h"
@@ -130,8 +130,15 @@ class BitcodeReaderMetadataList {
 
   LLVMContext &Context;
 
+  /// Maximum number of valid references. Forward references exceeding the
+  /// maximum must be invalid.
+  unsigned RefsUpperBound;
+
 public:
-  BitcodeReaderMetadataList(LLVMContext &C) : Context(C) {}
+  BitcodeReaderMetadataList(LLVMContext &C, size_t RefsUpperBound)
+      : Context(C),
+        RefsUpperBound(std::min((size_t)std::numeric_limits<unsigned>::max(),
+                                RefsUpperBound)) {}
 
   // vector compatibility methods
   unsigned size() const { return MetadataPtrs.size(); }
@@ -218,6 +225,10 @@ void BitcodeReaderMetadataList::assignValue(Metadata *MD, unsigned Idx) {
 }
 
 Metadata *BitcodeReaderMetadataList::getMetadataFwdRef(unsigned Idx) {
+  // Bail out for a clearly invalid value.
+  if (Idx >= RefsUpperBound)
+    return nullptr;
+
   if (Idx >= size())
     resize(Idx + 1);
 
@@ -504,7 +515,7 @@ class MetadataLoader::MetadataLoaderImpl {
       GV.getMetadata(LLVMContext::MD_dbg, MDs);
       GV.eraseMetadata(LLVMContext::MD_dbg);
       for (auto *MD : MDs)
-        if (auto *DGV = dyn_cast_or_null<DIGlobalVariable>(MD)) {
+        if (auto *DGV = dyn_cast<DIGlobalVariable>(MD)) {
           auto *DGVE = DIGlobalVariableExpression::getDistinct(
               Context, DGV, DIExpression::get(Context, {}));
           GV.addMetadata(LLVMContext::MD_dbg, *DGVE);
@@ -625,9 +636,10 @@ public:
                      BitcodeReaderValueList &ValueList,
                      std::function<Type *(unsigned)> getTypeByID,
                      bool IsImporting)
-      : MetadataList(TheModule.getContext()), ValueList(ValueList),
-        Stream(Stream), Context(TheModule.getContext()), TheModule(TheModule),
-        getTypeByID(std::move(getTypeByID)), IsImporting(IsImporting) {}
+      : MetadataList(TheModule.getContext(), Stream.SizeInBytes()),
+        ValueList(ValueList), Stream(Stream), Context(TheModule.getContext()),
+        TheModule(TheModule), getTypeByID(std::move(getTypeByID)),
+        IsImporting(IsImporting) {}
 
   Error parseMetadata(bool ModuleLevel);
 
@@ -975,7 +987,7 @@ void MetadataLoader::MetadataLoaderImpl::lazyLoadOneMetadata(
   assert(ID >= MDStringRef.size() && "Unexpected lazy-loading of MDString");
   // Lookup first if the metadata hasn't already been loaded.
   if (auto *MD = MetadataList.lookup(ID)) {
-    auto *N = dyn_cast_or_null<MDNode>(MD);
+    auto *N = cast<MDNode>(MD);
     if (!N->isTemporary())
       return;
   }
@@ -2121,7 +2133,7 @@ MetadataLoader::MetadataLoader(BitstreamCursor &Stream, Module &TheModule,
                                BitcodeReaderValueList &ValueList,
                                bool IsImporting,
                                std::function<Type *(unsigned)> getTypeByID)
-    : Pimpl(llvm::make_unique<MetadataLoaderImpl>(
+    : Pimpl(std::make_unique<MetadataLoaderImpl>(
           Stream, TheModule, ValueList, std::move(getTypeByID), IsImporting)) {}
 
 Error MetadataLoader::parseMetadata(bool ModuleLevel) {

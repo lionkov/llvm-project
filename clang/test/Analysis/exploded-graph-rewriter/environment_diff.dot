@@ -6,13 +6,22 @@
 // No diffs on the first node, nothing to check.
 Node0x1 [shape=record,label=
  "{
-    { "node_id": 1,
-      "pointer": "0x1",
+    {
       "state_id": 2,
-      "program_points": [],
+      "program_points": [
+        {
+          "kind": "BlockEntrance", "block_id": 1,
+          "terminator": null, "term_kind": null,
+          "tag": null, "node_id": 1,
+          "has_report": 0, "is_sink": 0
+        }
+      ],
       "program_state": {
         "store": null,
         "constraints": null,
+        "dynamic_types": null,
+        "constructing_objects": null,
+        "checker_messages": null,
         "environment": {
           "pointer": "0x2",
           "items": [
@@ -20,7 +29,7 @@ Node0x1 [shape=record,label=
               "location_context": "#0 Call",
               "lctx_id": 3,
               "calling": "foo",
-              "call_line": 4,
+              "location": null,
               "items": [
                 {
                   "stmt_id": 5,
@@ -52,13 +61,22 @@ Node0x1 -> Node0x6;
 // CHECK-SAME: </tr>
 Node0x6 [shape=record,label=
  "{
-    { "node_id": 6,
-      "pointer": "0x6",
+    {
       "state_id": 7,
-      "program_points": [],
+      "program_points": [
+        {
+          "kind": "BlockEntrance", "block_id": 1,
+          "terminator": null, "term_kind": null,
+          "tag": null, "node_id": 1,
+          "has_report": 0, "is_sink": 0
+        }
+      ],
       "program_state": {
         "store": null,
         "constraints": null,
+        "dynamic_types": null,
+        "constructing_objects": null,
+        "checker_messages": null,
         "environment": {
           "pointer": "0x2",
           "items": [
@@ -66,7 +84,7 @@ Node0x6 [shape=record,label=
               "location_context": "#0 Call",
               "lctx_id": 3,
               "calling": "foo",
-              "call_line": 4,
+              "location": null,
               "items": [
                 {
                   "stmt_id": 9,
@@ -92,13 +110,22 @@ Node0x6 -> Node0x9;
 // CHECK-SAME: </tr>
 Node0x9 [shape=record,label=
  "{
-    { "node_id": 9,
-      "pointer": "0x9",
+    {
       "state_id": 7,
-      "program_points": [],
+      "program_points": [
+        {
+          "kind": "BlockEntrance", "block_id": 1,
+          "terminator": null, "term_kind": null,
+          "tag": null, "node_id": 1,
+          "has_report": 0, "is_sink": 0
+        }
+      ],
       "program_state": {
         "store": null,
         "constraints": null,
+        "dynamic_types": null,
+        "constructing_objects": null,
+        "checker_messages": null,
         "environment": {
           "pointer": "0x2",
           "items": [
@@ -106,7 +133,7 @@ Node0x9 [shape=record,label=
               "location_context": "#0 Call",
               "lctx_id": 3,
               "calling": "foo",
-              "call_line": 4,
+              "location": null,
               "items": [
                 {
                   "stmt_id": 9,

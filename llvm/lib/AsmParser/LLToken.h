@@ -37,6 +37,7 @@ enum Kind {
   bar,     // |
   colon,   // :
 
+  kw_vscale,
   kw_x,
   kw_true,
   kw_false,
@@ -131,6 +132,7 @@ enum Kind {
   kw_fastcc,
   kw_coldcc,
   kw_intel_ocl_bicc,
+  kw_cfguard_checkcc,
   kw_x86_stdcallcc,
   kw_x86_fastcallcc,
   kw_x86_thiscallcc,
@@ -140,6 +142,7 @@ enum Kind {
   kw_arm_aapcscc,
   kw_arm_aapcs_vfpcc,
   kw_aarch64_vector_pcs,
+  kw_aarch64_sve_vector_pcs,
   kw_msp430_intrcc,
   kw_avr_intrcc,
   kw_avr_signalcc,
@@ -167,6 +170,7 @@ enum Kind {
   kw_amdgpu_ps,
   kw_amdgpu_cs,
   kw_amdgpu_kernel,
+  kw_tailcc,
 
   // Attributes:
   kw_attributes,
@@ -175,6 +179,7 @@ enum Kind {
   kw_argmemonly,
   kw_sanitize_address,
   kw_sanitize_hwaddress,
+  kw_sanitize_memtag,
   kw_builtin,
   kw_byval,
   kw_inalloca,
@@ -194,6 +199,7 @@ enum Kind {
   kw_nobuiltin,
   kw_nocapture,
   kw_noduplicate,
+  kw_nofree,
   kw_noimplicitfloat,
   kw_noinline,
   kw_norecurse,
@@ -201,6 +207,7 @@ enum Kind {
   kw_nonnull,
   kw_noredzone,
   kw_noreturn,
+  kw_nosync,
   kw_nocf_check,
   kw_nounwind,
   kw_optforfuzzing,
@@ -347,6 +354,8 @@ enum Kind {
   kw_insertvalue,
   kw_blockaddress,
 
+  kw_freeze,
+
   // Metadata types.
   kw_distinct,
 
@@ -375,6 +384,7 @@ enum Kind {
   kw_noRecurse,
   kw_returnDoesNotAlias,
   kw_noInline,
+  kw_alwaysInline,
   kw_calls,
   kw_callee,
   kw_hotness,
@@ -383,6 +393,8 @@ enum Kind {
   kw_critical,
   kw_relbf,
   kw_variable,
+  kw_vTableFuncs,
+  kw_virtFunc,
   kw_aliasee,
   kw_refs,
   kw_typeIdInfo,
@@ -395,6 +407,7 @@ enum Kind {
   kw_offset,
   kw_args,
   kw_typeid,
+  kw_typeidCompatibleVTable,
   kw_summary,
   kw_typeTestRes,
   kw_kind,

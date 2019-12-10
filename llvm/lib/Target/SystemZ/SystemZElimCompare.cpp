@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/CodeGen/LivePhysRegs.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -103,14 +104,6 @@ char SystemZElimCompare::ID = 0;
 
 } // end anonymous namespace
 
-// Return true if CC is live out of MBB.
-static bool isCCLiveOut(MachineBasicBlock &MBB) {
-  for (auto SI = MBB.succ_begin(), SE = MBB.succ_end(); SI != SE; ++SI)
-    if ((*SI)->isLiveIn(SystemZ::CC))
-      return true;
-  return false;
-}
-
 // Returns true if MI is an instruction whose output equals the value in Reg.
 static bool preservesValueOf(MachineInstr &MI, unsigned Reg) {
   switch (MI.getOpcode()) {
@@ -152,7 +145,7 @@ Reference SystemZElimCompare::getRegReferences(MachineInstr &MI, unsigned Reg) {
   for (unsigned I = 0, E = MI.getNumOperands(); I != E; ++I) {
     const MachineOperand &MO = MI.getOperand(I);
     if (MO.isReg()) {
-      if (unsigned MOReg = MO.getReg()) {
+      if (Register MOReg = MO.getReg()) {
         if (TRI->regsOverlap(MOReg, Reg)) {
           if (MO.isUse())
             Ref.Use = true;
@@ -302,6 +295,11 @@ bool SystemZElimCompare::convertToLoadAndTest(
   MIB.setMemRefs(MI.memoperands());
   MI.eraseFromParent();
 
+  // Mark instruction as raising an FP exception if applicable.  We already
+  // verified earlier that this move is valid.
+  if (Compare.mayRaiseFPException())
+    MIB.setMIFlag(MachineInstr::MIFlag::FPExcept);
+
   return true;
 }
 
@@ -318,6 +316,18 @@ bool SystemZElimCompare::adjustCCMasksForInstr(
   int Opcode = (ConvOpc ? ConvOpc : MI.getOpcode());
   const MCInstrDesc &Desc = TII->get(Opcode);
   unsigned MIFlags = Desc.TSFlags;
+
+  // If Compare may raise an FP exception, we can only eliminate it
+  // if MI itself would have already raised the exception.
+  if (Compare.mayRaiseFPException()) {
+    // If the caller will change MI to use ConvOpc, only test whether
+    // ConvOpc is suitable; it is on the caller to set the MI flag.
+    if (ConvOpc && !Desc.mayRaiseFPException())
+      return false;
+    // If the caller will not change MI, we test the MI flag here.
+    if (!ConvOpc && !MI.mayRaiseFPException())
+      return false;
+  }
 
   // See which compare-style condition codes are available.
   unsigned ReusableCCMask = SystemZII::getCompareZeroCCMask(MIFlags);
@@ -378,11 +388,8 @@ bool SystemZElimCompare::adjustCCMasksForInstr(
   }
 
   // CC is now live after MI.
-  if (!ConvOpc) {
-    int CCDef = MI.findRegisterDefOperandIdx(SystemZ::CC, false, true, TRI);
-    assert(CCDef >= 0 && "Couldn't find CC set");
-    MI.getOperand(CCDef).setIsDead(false);
-  }
+  if (!ConvOpc)
+    MI.clearRegisterDeads(SystemZ::CC);
 
   // Check if MI lies before Compare.
   bool BeforeCmp = false;
@@ -463,6 +470,12 @@ bool SystemZElimCompare::optimizeCompareZero(
       break;
     CCRefs |= getRegReferences(MI, SystemZ::CC);
     if (CCRefs.Use && CCRefs.Def)
+      break;
+    // Eliminating a Compare that may raise an FP exception will move
+    // raising the exception to some earlier MI.  We cannot do this if
+    // there is anything in between that might change exception flags.
+    if (Compare.mayRaiseFPException() &&
+        (MI.isCall() || MI.hasUnmodeledSideEffects()))
       break;
   }
 
@@ -598,7 +611,9 @@ bool SystemZElimCompare::processBlock(MachineBasicBlock &MBB) {
   // Walk backwards through the block looking for comparisons, recording
   // all CC users as we go.  The subroutines can delete Compare and
   // instructions before it.
-  bool CompleteCCUsers = !isCCLiveOut(MBB);
+  LivePhysRegs LiveRegs(*TRI);
+  LiveRegs.addLiveOuts(MBB);
+  bool CompleteCCUsers = !LiveRegs.contains(SystemZ::CC);
   SmallVector<MachineInstr *, 4> CCUsers;
   MachineBasicBlock::iterator MBBI = MBB.end();
   while (MBBI != MBB.begin()) {

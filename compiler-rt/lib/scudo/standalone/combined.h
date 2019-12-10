@@ -45,9 +45,9 @@ public:
       NewHeader.State = Chunk::State::Available;
       Chunk::compareExchangeHeader(Allocator.Cookie, Ptr, &NewHeader, &Header);
 
-      void *BlockBegin = Chunk::getBlockBegin(Ptr, &Header);
-      const uptr ClassId = Header.ClassId;
-      if (ClassId)
+      void *BlockBegin = Allocator::getBlockBegin(Ptr, &NewHeader);
+      const uptr ClassId = NewHeader.ClassId;
+      if (LIKELY(ClassId))
         Cache.deallocate(ClassId, BlockBegin);
       else
         Allocator.Secondary.deallocate(BlockBegin);
@@ -123,14 +123,16 @@ public:
     Options.ZeroContents = getFlags()->zero_contents;
     Options.DeallocTypeMismatch = getFlags()->dealloc_type_mismatch;
     Options.DeleteSizeMismatch = getFlags()->delete_size_mismatch;
-    Options.QuarantineMaxChunkSize = getFlags()->quarantine_max_chunk_size;
+    Options.QuarantineMaxChunkSize =
+        static_cast<u32>(getFlags()->quarantine_max_chunk_size);
 
     Stats.initLinkerInitialized();
     Primary.initLinkerInitialized(getFlags()->release_to_os_interval_ms);
     Secondary.initLinkerInitialized(&Stats);
 
-    Quarantine.init(getFlags()->quarantine_size_kb << 10,
-                    getFlags()->thread_local_quarantine_size_kb << 10);
+    Quarantine.init(
+        static_cast<uptr>(getFlags()->quarantine_size_kb << 10),
+        static_cast<uptr>(getFlags()->thread_local_quarantine_size_kb << 10));
   }
 
   void reset() { memset(this, 0, sizeof(*this)); }
@@ -142,7 +144,10 @@ public:
 
   TSDRegistryT *getTSDRegistry() { return &TSDRegistry; }
 
-  void initCache(CacheT *Cache) { Cache->init(&Stats, &Primary); }
+  // The Cache must be provided zero-initialized.
+  void initCache(CacheT *Cache) {
+    Cache->initLinkerInitialized(&Stats, &Primary);
+  }
 
   // Release the resources used by a TSD, which involves:
   // - draining the local quarantine cache to the global quarantine;
@@ -159,36 +164,40 @@ public:
                           uptr Alignment = MinAlignment,
                           bool ZeroContents = false) {
     initThreadMaybe();
+    ZeroContents |= static_cast<bool>(Options.ZeroContents);
 
     if (UNLIKELY(Alignment > MaxAlignment)) {
       if (Options.MayReturnNull)
         return nullptr;
       reportAlignmentTooBig(Alignment, MaxAlignment);
     }
-    if (UNLIKELY(Alignment < MinAlignment))
+    if (Alignment < MinAlignment)
       Alignment = MinAlignment;
 
     // If the requested size happens to be 0 (more common than you might think),
-    // allocate 1 byte on top of the header. Then add the extra bytes required
-    // to fulfill the alignment requirements: we allocate enough to be sure that
-    // there will be an address in the block that will satisfy the alignment.
+    // allocate MinAlignment bytes on top of the header. Then add the extra
+    // bytes required to fulfill the alignment requirements: we allocate enough
+    // to be sure that there will be an address in the block that will satisfy
+    // the alignment.
     const uptr NeededSize =
-        Chunk::getHeaderSize() + roundUpTo(Size ? Size : 1, MinAlignment) +
-        ((Alignment > MinAlignment) ? (Alignment - Chunk::getHeaderSize()) : 0);
+        roundUpTo(Size, MinAlignment) +
+        ((Alignment > MinAlignment) ? Alignment : Chunk::getHeaderSize());
 
     // Takes care of extravagantly large sizes as well as integer overflows.
-    if (UNLIKELY(Size >= MaxAllowedMallocSize ||
-                 NeededSize >= MaxAllowedMallocSize)) {
+    static_assert(MaxAllowedMallocSize < UINTPTR_MAX - MaxAlignment, "");
+    if (UNLIKELY(Size >= MaxAllowedMallocSize)) {
       if (Options.MayReturnNull)
         return nullptr;
       reportAllocationSizeTooBig(Size, NeededSize, MaxAllowedMallocSize);
     }
+    DCHECK_LE(Size, NeededSize);
 
     void *Block;
     uptr ClassId;
-    uptr BlockEnd = 0;
-    if (PrimaryT::canAllocate(NeededSize)) {
+    uptr BlockEnd;
+    if (LIKELY(PrimaryT::canAllocate(NeededSize))) {
       ClassId = SizeClassMap::getClassIdBySize(NeededSize);
+      DCHECK_NE(ClassId, 0U);
       bool UnlockRequired;
       auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
       Block = TSD->Cache.allocate(ClassId);
@@ -196,7 +205,8 @@ public:
         TSD->unlock();
     } else {
       ClassId = 0;
-      Block = Secondary.allocate(NeededSize, Alignment, &BlockEnd);
+      Block =
+          Secondary.allocate(NeededSize, Alignment, &BlockEnd, ZeroContents);
     }
 
     if (UNLIKELY(!Block)) {
@@ -205,18 +215,18 @@ public:
       reportOutOfMemory(NeededSize);
     }
 
-    // We only need to zero the contents for Primary backed allocations.
-    if ((ZeroContents || Options.ZeroContents) && ClassId)
+    // We only need to zero the contents for Primary backed allocations. This
+    // condition is not necessarily unlikely, but since memset is costly, we
+    // might as well mark it as such.
+    if (UNLIKELY(ZeroContents && ClassId))
       memset(Block, 0, PrimaryT::getSizeByClassId(ClassId));
 
     Chunk::UnpackedHeader Header = {};
     uptr UserPtr = reinterpret_cast<uptr>(Block) + Chunk::getHeaderSize();
-    // The following condition isn't necessarily "UNLIKELY".
-    if (!isAligned(UserPtr, Alignment)) {
+    if (UNLIKELY(!isAligned(UserPtr, Alignment))) {
       const uptr AlignedUserPtr = roundUpTo(UserPtr, Alignment);
       const uptr Offset = AlignedUserPtr - UserPtr;
-      Header.Offset = (Offset >> MinAlignmentLog) & Chunk::OffsetMask;
-      DCHECK_GT(Offset, 2 * sizeof(u32));
+      DCHECK_GE(Offset, 2 * sizeof(u32));
       // The BlockMarker has no security purpose, but is specifically meant for
       // the chunk iteration function that can be used in debugging situations.
       // It is the only situation where we have to locate the start of a chunk
@@ -224,16 +234,13 @@ public:
       reinterpret_cast<u32 *>(Block)[0] = BlockMarker;
       reinterpret_cast<u32 *>(Block)[1] = static_cast<u32>(Offset);
       UserPtr = AlignedUserPtr;
+      Header.Offset = (Offset >> MinAlignmentLog) & Chunk::OffsetMask;
     }
+    Header.ClassId = ClassId & Chunk::ClassIdMask;
     Header.State = Chunk::State::Allocated;
     Header.Origin = Origin & Chunk::OriginMask;
-    if (ClassId) {
-      Header.ClassId = ClassId & Chunk::ClassIdMask;
-      Header.SizeOrUnusedBytes = Size & Chunk::SizeOrUnusedBytesMask;
-    } else {
-      Header.SizeOrUnusedBytes =
-          (BlockEnd - (UserPtr + Size)) & Chunk::SizeOrUnusedBytesMask;
-    }
+    Header.SizeOrUnusedBytes = (ClassId ? Size : BlockEnd - (UserPtr + Size)) &
+                               Chunk::SizeOrUnusedBytesMask;
     void *Ptr = reinterpret_cast<void *>(UserPtr);
     Chunk::storeHeader(Cookie, Ptr, &Header);
 
@@ -310,18 +317,30 @@ public:
                                   OldHeader.Origin, Chunk::Origin::Malloc);
     }
 
-    const uptr OldSize = getSize(OldPtr, &OldHeader);
-    // If the new size is identical to the old one, or lower but within an
-    // acceptable range, we just keep the old chunk, and update its header.
-    if (NewSize == OldSize)
-      return OldPtr;
-    if (NewSize < OldSize) {
-      const uptr Delta = OldSize - NewSize;
-      if (Delta < (SizeClassMap::MaxSize / 2)) {
+    void *BlockBegin = getBlockBegin(OldPtr, &OldHeader);
+    uptr BlockEnd;
+    uptr OldSize;
+    const uptr ClassId = OldHeader.ClassId;
+    if (LIKELY(ClassId)) {
+      BlockEnd = reinterpret_cast<uptr>(BlockBegin) +
+                 SizeClassMap::getSizeByClassId(ClassId);
+      OldSize = OldHeader.SizeOrUnusedBytes;
+    } else {
+      BlockEnd = SecondaryT::getBlockEnd(BlockBegin);
+      OldSize = BlockEnd -
+                (reinterpret_cast<uptr>(OldPtr) + OldHeader.SizeOrUnusedBytes);
+    }
+    // If the new chunk still fits in the previously allocated block (with a
+    // reasonable delta), we just keep the old block, and update the chunk
+    // header to reflect the size change.
+    if (reinterpret_cast<uptr>(OldPtr) + NewSize <= BlockEnd) {
+      const uptr Delta =
+          OldSize < NewSize ? NewSize - OldSize : OldSize - NewSize;
+      if (Delta <= SizeClassMap::MaxSize / 2) {
         Chunk::UnpackedHeader NewHeader = OldHeader;
         NewHeader.SizeOrUnusedBytes =
-            (OldHeader.ClassId ? NewHeader.SizeOrUnusedBytes - Delta
-                               : NewHeader.SizeOrUnusedBytes + Delta) &
+            (ClassId ? NewSize
+                     : BlockEnd - (reinterpret_cast<uptr>(OldPtr) + NewSize)) &
             Chunk::SizeOrUnusedBytesMask;
         Chunk::compareExchangeHeader(Cookie, OldPtr, &NewHeader, &OldHeader);
         return OldPtr;
@@ -334,6 +353,7 @@ public:
     // are currently unclear.
     void *NewPtr = allocate(NewSize, Chunk::Origin::Malloc, Alignment);
     if (NewPtr) {
+      const uptr OldSize = getSize(OldPtr, &OldHeader);
       memcpy(NewPtr, OldPtr, Min(NewSize, OldSize));
       quarantineOrDeallocateChunk(OldPtr, &OldHeader, OldSize);
     }
@@ -355,15 +375,37 @@ public:
     Primary.enable();
   }
 
-  void printStats() {
+  // The function returns the amount of bytes required to store the statistics,
+  // which might be larger than the amount of bytes provided. Note that the
+  // statistics buffer is not necessarily constant between calls to this
+  // function. This can be called with a null buffer or zero size for buffer
+  // sizing purposes.
+  uptr getStats(char *Buffer, uptr Size) {
+    ScopedString Str(1024);
     disable();
-    Primary.printStats();
-    Secondary.printStats();
-    Quarantine.printStats();
+    const uptr Length = getStats(&Str) + 1;
     enable();
+    if (Length < Size)
+      Size = Length;
+    if (Buffer && Size) {
+      memcpy(Buffer, Str.data(), Size);
+      Buffer[Size - 1] = '\0';
+    }
+    return Length;
   }
 
-  void releaseToOS() { Primary.releaseToOS(); }
+  void printStats() {
+    ScopedString Str(1024);
+    disable();
+    getStats(&Str);
+    enable();
+    Str.output();
+  }
+
+  void releaseToOS() {
+    initThreadMaybe();
+    Primary.releaseToOS();
+  }
 
   // Iterate over all chunks and call a callback for all busy chunks located
   // within the provided memory range. Said callback must not use this allocator
@@ -374,7 +416,7 @@ public:
     const uptr From = Base;
     const uptr To = Base + Size;
     auto Lambda = [this, From, To, Callback, Arg](uptr Block) {
-      if (Block < From || Block > To)
+      if (Block < From || Block >= To)
         return;
       uptr ChunkSize;
       const uptr ChunkBase = getChunkFromBlock(Block, &ChunkSize);
@@ -415,8 +457,20 @@ public:
     Stats.get(S);
   }
 
+  // Returns true if the pointer provided was allocated by the current
+  // allocator instance, which is compliant with tcmalloc's ownership concept.
+  // A corrupted chunk will not be reported as owned, which is WAI.
+  bool isOwned(const void *Ptr) {
+    initThreadMaybe();
+    if (!Ptr || !isAligned(reinterpret_cast<uptr>(Ptr), MinAlignment))
+      return false;
+    Chunk::UnpackedHeader Header;
+    return Chunk::isValid(Cookie, Ptr, &Header) &&
+           Header.State == Chunk::State::Allocated;
+  }
+
 private:
-  typedef MapAllocator SecondaryT;
+  using SecondaryT = typename Params::Secondary;
   typedef typename PrimaryT::SizeClassMap SizeClassMap;
 
   static const uptr MinAlignmentLog = SCUDO_MIN_ALIGNMENT_LOG;
@@ -425,6 +479,9 @@ private:
   static const uptr MaxAlignment = 1UL << MaxAlignmentLog;
   static const uptr MaxAllowedMallocSize =
       FIRST_32_SECOND_64(1UL << 31, 1ULL << 40);
+
+  static_assert(MinAlignment >= sizeof(Chunk::PackedHeader),
+                "Minimal alignment must at least cover a chunk header.");
 
   // Constants used by the chunk iteration mechanism.
   static const u32 BlockMarker = 0x44554353U;
@@ -471,8 +528,7 @@ private:
     // last and last class sizes, as well as the dynamic base for the Primary.
     // The following is an over-approximation that works for our needs.
     const uptr MaxSizeOrUnusedBytes = SizeClassMap::MaxSize - 1;
-    Header.SizeOrUnusedBytes =
-        MaxSizeOrUnusedBytes & Chunk::SizeOrUnusedBytesMask;
+    Header.SizeOrUnusedBytes = MaxSizeOrUnusedBytes;
     if (UNLIKELY(Header.SizeOrUnusedBytes != MaxSizeOrUnusedBytes))
       reportSanityCheckError("size (or unused bytes)");
 
@@ -482,12 +538,19 @@ private:
       reportSanityCheckError("class ID");
   }
 
+  static inline void *getBlockBegin(const void *Ptr,
+                                    Chunk::UnpackedHeader *Header) {
+    return reinterpret_cast<void *>(
+        reinterpret_cast<uptr>(Ptr) - Chunk::getHeaderSize() -
+        (static_cast<uptr>(Header->Offset) << MinAlignmentLog));
+  }
+
   // Return the size of a chunk as requested during its allocation.
-  INLINE uptr getSize(const void *Ptr, Chunk::UnpackedHeader *Header) {
+  inline uptr getSize(const void *Ptr, Chunk::UnpackedHeader *Header) {
     const uptr SizeOrUnusedBytes = Header->SizeOrUnusedBytes;
-    if (Header->ClassId)
+    if (LIKELY(Header->ClassId))
       return SizeOrUnusedBytes;
-    return SecondaryT::getBlockEnd(Chunk::getBlockBegin(Ptr, Header)) -
+    return SecondaryT::getBlockEnd(getBlockBegin(Ptr, Header)) -
            reinterpret_cast<uptr>(Ptr) - SizeOrUnusedBytes;
   }
 
@@ -500,14 +563,16 @@ private:
     Chunk::UnpackedHeader NewHeader = *Header;
     // If the quarantine is disabled, the actual size of a chunk is 0 or larger
     // than the maximum allowed, we return a chunk directly to the backend.
-    const bool BypassQuarantine = !Quarantine.getCacheSize() || !Size ||
+    // Logical Or can be short-circuited, which introduces unnecessary
+    // conditional jumps, so use bitwise Or and let the compiler be clever.
+    const bool BypassQuarantine = !Quarantine.getCacheSize() | !Size |
                                   (Size > Options.QuarantineMaxChunkSize);
     if (BypassQuarantine) {
       NewHeader.State = Chunk::State::Available;
       Chunk::compareExchangeHeader(Cookie, Ptr, &NewHeader, Header);
-      void *BlockBegin = Chunk::getBlockBegin(Ptr, Header);
+      void *BlockBegin = getBlockBegin(Ptr, &NewHeader);
       const uptr ClassId = NewHeader.ClassId;
-      if (ClassId) {
+      if (LIKELY(ClassId)) {
         bool UnlockRequired;
         auto *TSD = TSDRegistry.getTSDAndLock(&UnlockRequired);
         TSD->Cache.deallocate(ClassId, BlockBegin);
@@ -542,6 +607,13 @@ private:
     if (Size)
       *Size = getSize(Ptr, &Header);
     return P;
+  }
+
+  uptr getStats(ScopedString *Str) {
+    Primary.getStats(Str);
+    Secondary.getStats(Str);
+    Quarantine.getStats(Str);
+    return Str->length();
   }
 };
 

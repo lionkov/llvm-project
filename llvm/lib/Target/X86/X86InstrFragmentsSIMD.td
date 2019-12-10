@@ -99,10 +99,12 @@ def X86insertps : SDNode<"X86ISD::INSERTPS",
 def X86vzmovl  : SDNode<"X86ISD::VZEXT_MOVL",
                  SDTypeProfile<1, 1, [SDTCisSameAs<0,1>]>>;
 
-def X86vzload  : SDNode<"X86ISD::VZEXT_LOAD", SDTLoad,
-                        [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
-def X86vextractstore  : SDNode<"X86ISD::VEXTRACT_STORE", SDTStore,
-                        [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
+def X86vzld  : SDNode<"X86ISD::VZEXT_LOAD", SDTLoad,
+                      [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def X86vextractst  : SDNode<"X86ISD::VEXTRACT_STORE", SDTStore,
+                     [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
+def X86VBroadcastld  : SDNode<"X86ISD::VBROADCAST_LOAD", SDTLoad,
+                      [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
 
 def SDTVtrunc    : SDTypeProfile<1, 1, [SDTCisVec<0>, SDTCisVec<1>,
                                         SDTCisInt<0>, SDTCisInt<1>,
@@ -704,6 +706,10 @@ def X86GF2P8affineinvqb : SDNode<"X86ISD::GF2P8AFFINEINVQB", SDTBlend>;
 def X86GF2P8affineqb    : SDNode<"X86ISD::GF2P8AFFINEQB", SDTBlend>;
 def X86GF2P8mulb        : SDNode<"X86ISD::GF2P8MULB", SDTIntBinOp>;
 
+def SDTX86MaskedStore: SDTypeProfile<0, 3, [       // masked store
+  SDTCisVec<0>, SDTCisPtrTy<1>, SDTCisVec<2>, SDTCisSameNumEltsAs<0, 2>
+]>;
+
 //===----------------------------------------------------------------------===//
 // SSE Complex Patterns
 //===----------------------------------------------------------------------===//
@@ -939,8 +945,40 @@ def bc_v8i64 : PatFrag<(ops node:$in), (v8i64 (bitconvert node:$in))>;
 def bc_v8f64 : PatFrag<(ops node:$in), (v8f64 (bitconvert node:$in))>;
 def bc_v16f32 : PatFrag<(ops node:$in), (v16f32 (bitconvert node:$in))>;
 
-def vzload_v2i64 : PatFrag<(ops node:$src),
-                           (bitconvert (v2i64 (X86vzload node:$src)))>;
+def X86vzload32 : PatFrag<(ops node:$src),
+                          (X86vzld node:$src), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 4;
+}]>;
+
+def X86vzload64 : PatFrag<(ops node:$src),
+                          (X86vzld node:$src), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 8;
+}]>;
+
+def X86vextractstore64 : PatFrag<(ops node:$val, node:$ptr),
+                                 (X86vextractst node:$val, node:$ptr), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 8;
+}]>;
+
+def X86VBroadcastld8 : PatFrag<(ops node:$src),
+                               (X86VBroadcastld node:$src), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 1;
+}]>;
+
+def X86VBroadcastld16 : PatFrag<(ops node:$src),
+                                (X86VBroadcastld node:$src), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 2;
+}]>;
+
+def X86VBroadcastld32 : PatFrag<(ops node:$src),
+                                (X86VBroadcastld node:$src), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 4;
+}]>;
+
+def X86VBroadcastld64 : PatFrag<(ops node:$src),
+                                (X86VBroadcastld node:$src), [{
+  return cast<MemIntrinsicSDNode>(N)->getMemoryVT().getStoreSize() == 8;
+}]>;
 
 
 def fp32imm0 : PatLeaf<(f32 fpimm), [{
@@ -948,6 +986,10 @@ def fp32imm0 : PatLeaf<(f32 fpimm), [{
 }]>;
 
 def fp64imm0 : PatLeaf<(f64 fpimm), [{
+  return N->isExactlyValue(+0.0);
+}]>;
+
+def fp128imm0 : PatLeaf<(f128 fpimm), [{
   return N->isExactlyValue(+0.0);
 }]>;
 
@@ -1002,9 +1044,10 @@ def vinsert256_insert : PatFrag<(ops node:$bigvec, node:$smallvec,
                                 INSERT_get_vinsert256_imm>;
 
 def masked_load : PatFrag<(ops node:$src1, node:$src2, node:$src3),
-                          (masked_ld node:$src1, node:$src2, node:$src3), [{
+                          (masked_ld node:$src1, undef, node:$src2, node:$src3), [{
   return !cast<MaskedLoadSDNode>(N)->isExpandingLoad() &&
-    cast<MaskedLoadSDNode>(N)->getExtensionType() == ISD::NON_EXTLOAD;
+    cast<MaskedLoadSDNode>(N)->getExtensionType() == ISD::NON_EXTLOAD &&
+    cast<MaskedLoadSDNode>(N)->isUnindexed();
 }]>;
 
 def masked_load_aligned : PatFrag<(ops node:$src1, node:$src2, node:$src3),
@@ -1017,17 +1060,19 @@ def masked_load_aligned : PatFrag<(ops node:$src1, node:$src2, node:$src3),
 }]>;
 
 def X86mExpandingLoad : PatFrag<(ops node:$src1, node:$src2, node:$src3),
-                         (masked_ld node:$src1, node:$src2, node:$src3), [{
-  return cast<MaskedLoadSDNode>(N)->isExpandingLoad();
+                         (masked_ld node:$src1, undef, node:$src2, node:$src3), [{
+  return cast<MaskedLoadSDNode>(N)->isExpandingLoad() &&
+         cast<MaskedLoadSDNode>(N)->isUnindexed();
 }]>;
 
 // Masked store fragments.
 // X86mstore can't be implemented in core DAG files because some targets
 // do not support vector types (llvm-tblgen will fail).
 def masked_store : PatFrag<(ops node:$src1, node:$src2, node:$src3),
-                        (masked_st node:$src1, node:$src2, node:$src3), [{
-  return (!cast<MaskedStoreSDNode>(N)->isTruncatingStore()) &&
-         (!cast<MaskedStoreSDNode>(N)->isCompressingStore());
+                        (masked_st node:$src1, node:$src2, undef, node:$src3), [{
+  return !cast<MaskedStoreSDNode>(N)->isTruncatingStore() &&
+         !cast<MaskedStoreSDNode>(N)->isCompressingStore() &&
+         cast<MaskedStoreSDNode>(N)->isUnindexed();
 }]>;
 
 def masked_store_aligned : PatFrag<(ops node:$src1, node:$src2, node:$src3),
@@ -1040,16 +1085,18 @@ def masked_store_aligned : PatFrag<(ops node:$src1, node:$src2, node:$src3),
 }]>;
 
 def X86mCompressingStore : PatFrag<(ops node:$src1, node:$src2, node:$src3),
-                             (masked_st node:$src1, node:$src2, node:$src3), [{
-    return cast<MaskedStoreSDNode>(N)->isCompressingStore();
+                             (masked_st node:$src1, node:$src2, undef, node:$src3), [{
+    return cast<MaskedStoreSDNode>(N)->isCompressingStore() &&
+           cast<MaskedStoreSDNode>(N)->isUnindexed();
 }]>;
 
 // masked truncstore fragments
 // X86mtruncstore can't be implemented in core DAG files because some targets
 // doesn't support vector type ( llvm-tblgen will fail)
 def X86mtruncstore : PatFrag<(ops node:$src1, node:$src2, node:$src3),
-                             (masked_st node:$src1, node:$src2, node:$src3), [{
-    return cast<MaskedStoreSDNode>(N)->isTruncatingStore();
+                             (masked_st node:$src1, node:$src2, undef, node:$src3), [{
+    return cast<MaskedStoreSDNode>(N)->isTruncatingStore() &&
+           cast<MaskedStoreSDNode>(N)->isUnindexed();
 }]>;
 def masked_truncstorevi8 :
   PatFrag<(ops node:$src1, node:$src2, node:$src3),
@@ -1073,10 +1120,10 @@ def X86TruncSStore : SDNode<"X86ISD::VTRUNCSTORES",  SDTStore,
 def X86TruncUSStore : SDNode<"X86ISD::VTRUNCSTOREUS",  SDTStore,
                        [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 
-def X86MTruncSStore : SDNode<"X86ISD::VMTRUNCSTORES",  SDTMaskedStore,
+def X86MTruncSStore : SDNode<"X86ISD::VMTRUNCSTORES",  SDTX86MaskedStore,
                        [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 
-def X86MTruncUSStore : SDNode<"X86ISD::VMTRUNCSTOREUS",  SDTMaskedStore,
+def X86MTruncUSStore : SDNode<"X86ISD::VMTRUNCSTOREUS",  SDTX86MaskedStore,
                        [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 
 def truncstore_s_vi8 : PatFrag<(ops node:$val, node:$ptr),

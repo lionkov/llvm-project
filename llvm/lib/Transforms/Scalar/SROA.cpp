@@ -41,7 +41,6 @@
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/Loads.h"
 #include "llvm/Analysis/PtrUseVisitor.h"
-#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/Constant.h"
@@ -71,6 +70,7 @@
 #include "llvm/IR/Use.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Pass.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
@@ -80,6 +80,7 @@
 #include "llvm/Support/MathExtras.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/PromoteMemToReg.h"
 #include <algorithm>
 #include <cassert>
@@ -361,7 +362,7 @@ private:
 
   /// The beginning and ending offsets of the alloca for this
   /// partition.
-  uint64_t BeginOffset, EndOffset;
+  uint64_t BeginOffset = 0, EndOffset = 0;
 
   /// The start and end iterators of this partition.
   iterator SI, SJ;
@@ -959,14 +960,16 @@ private:
       std::tie(UsedI, I) = Uses.pop_back_val();
 
       if (LoadInst *LI = dyn_cast<LoadInst>(I)) {
-        Size = std::max(Size, DL.getTypeStoreSize(LI->getType()));
+        Size = std::max(Size,
+                        DL.getTypeStoreSize(LI->getType()).getFixedSize());
         continue;
       }
       if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
         Value *Op = SI->getOperand(0);
         if (Op == UsedI)
           return SI;
-        Size = std::max(Size, DL.getTypeStoreSize(Op->getType()));
+        Size = std::max(Size,
+                        DL.getTypeStoreSize(Op->getType()).getFixedSize());
         continue;
       }
 
@@ -1190,12 +1193,16 @@ static Type *findCommonType(AllocaSlices::const_iterator B,
 /// FIXME: This should be hoisted into a generic utility, likely in
 /// Transforms/Util/Local.h
 static bool isSafePHIToSpeculate(PHINode &PN) {
+  const DataLayout &DL = PN.getModule()->getDataLayout();
+
   // For now, we can only do this promotion if the load is in the same block
   // as the PHI, and if there are no stores between the phi and load.
   // TODO: Allow recursive phi users.
   // TODO: Allow stores.
   BasicBlock *BB = PN.getParent();
-  unsigned MaxAlign = 0;
+  MaybeAlign MaxAlign;
+  uint64_t APWidth = DL.getIndexTypeSizeInBits(PN.getType());
+  APInt MaxSize(APWidth, 0);
   bool HaveLoad = false;
   for (User *U : PN.users()) {
     LoadInst *LI = dyn_cast<LoadInst>(U);
@@ -1214,14 +1221,14 @@ static bool isSafePHIToSpeculate(PHINode &PN) {
       if (BBI->mayWriteToMemory())
         return false;
 
-    MaxAlign = std::max(MaxAlign, LI->getAlignment());
+    uint64_t Size = DL.getTypeStoreSize(LI->getType());
+    MaxAlign = std::max(MaxAlign, MaybeAlign(LI->getAlignment()));
+    MaxSize = MaxSize.ult(Size) ? APInt(APWidth, Size) : MaxSize;
     HaveLoad = true;
   }
 
   if (!HaveLoad)
     return false;
-
-  const DataLayout &DL = PN.getModule()->getDataLayout();
 
   // We can only transform this if it is safe to push the loads into the
   // predecessor blocks. The only thing to watch out for is that we can't put
@@ -1244,7 +1251,7 @@ static bool isSafePHIToSpeculate(PHINode &PN) {
     // If this pointer is always safe to load, or if we can prove that there
     // is already a load in the block, then we can move the load to the pred
     // block.
-    if (isSafeToLoadUnconditionally(InVal, MaxAlign, DL, TI))
+    if (isSafeToLoadUnconditionally(InVal, MaxAlign, MaxSize, DL, TI))
       continue;
 
     return false;
@@ -1262,11 +1269,11 @@ static void speculatePHINodeLoads(PHINode &PN) {
   PHINode *NewPN = PHIBuilder.CreatePHI(LoadTy, PN.getNumIncomingValues(),
                                         PN.getName() + ".sroa.speculated");
 
-  // Get the AA tags and alignment to use from one of the loads.  It doesn't
+  // Get the AA tags and alignment to use from one of the loads. It does not
   // matter which one we get and if any differ.
   AAMDNodes AATags;
   SomeLoad->getAAMetadata(AATags);
-  unsigned Align = SomeLoad->getAlignment();
+  const MaybeAlign Align = MaybeAlign(SomeLoad->getAlignment());
 
   // Rewrite all loads of the PN to use the new PHI.
   while (!PN.use_empty()) {
@@ -1334,9 +1341,11 @@ static bool isSafeSelectToSpeculate(SelectInst &SI) {
     // Both operands to the select need to be dereferenceable, either
     // absolutely (e.g. allocas) or at this point because we can see other
     // accesses to it.
-    if (!isSafeToLoadUnconditionally(TValue, LI->getAlignment(), DL, LI))
+    if (!isSafeToLoadUnconditionally(TValue, LI->getType(),
+                                     MaybeAlign(LI->getAlignment()), DL, LI))
       return false;
-    if (!isSafeToLoadUnconditionally(FValue, LI->getAlignment(), DL, LI))
+    if (!isSafeToLoadUnconditionally(FValue, LI->getType(),
+                                     MaybeAlign(LI->getAlignment()), DL, LI))
       return false;
   }
 
@@ -1362,8 +1371,8 @@ static void speculateSelectInstLoads(SelectInst &SI) {
     NumLoadsSpeculated += 2;
 
     // Transfer alignment and AA info if present.
-    TL->setAlignment(LI->getAlignment());
-    FL->setAlignment(LI->getAlignment());
+    TL->setAlignment(MaybeAlign(LI->getAlignment()));
+    FL->setAlignment(MaybeAlign(LI->getAlignment()));
 
     AAMDNodes Tags;
     LI->getAAMetadata(Tags);
@@ -1674,7 +1683,7 @@ static Value *getAdjustedPtr(IRBuilderTy &IRB, const DataLayout &DL, Value *Ptr,
 /// Compute the adjusted alignment for a load or store from an offset.
 static unsigned getAdjustedAlignment(Instruction *I, uint64_t Offset,
                                      const DataLayout &DL) {
-  unsigned Alignment;
+  unsigned Alignment = 0;
   Type *Ty;
   if (auto *LI = dyn_cast<LoadInst>(I)) {
     Alignment = LI->getAlignment();
@@ -1882,6 +1891,14 @@ static VectorType *isVectorPromotionViable(Partition &P, const DataLayout &DL) {
   bool HaveCommonEltTy = true;
   auto CheckCandidateType = [&](Type *Ty) {
     if (auto *VTy = dyn_cast<VectorType>(Ty)) {
+      // Return if bitcast to vectors is different for total size in bits.
+      if (!CandidateTys.empty()) {
+        VectorType *V = CandidateTys[0];
+        if (DL.getTypeSizeInBits(VTy) != DL.getTypeSizeInBits(V)) {
+          CandidateTys.clear();
+          return;
+        }
+      }
       CandidateTys.push_back(VTy);
       if (!CommonEltTy)
         CommonEltTy = VTy->getElementType();
@@ -2284,9 +2301,9 @@ class llvm::sroa::AllocaSliceRewriter
 
   // The new offsets of the slice currently being rewritten relative to the
   // original alloca.
-  uint64_t NewBeginOffset, NewEndOffset;
+  uint64_t NewBeginOffset = 0, NewEndOffset = 0;
 
-  uint64_t SliceSize;
+  uint64_t SliceSize = 0;
   bool IsSplittable = false;
   bool IsSplit = false;
   Use *OldUse = nullptr;
@@ -2784,7 +2801,7 @@ private:
       Constant *Size = ConstantInt::get(SizeTy, NewEndOffset - NewBeginOffset);
       CallInst *New = IRB.CreateMemSet(
           getNewAllocaSlicePtr(IRB, OldPtr->getType()), II.getValue(), Size,
-          getSliceAlign(), II.isVolatile());
+          MaybeAlign(getSliceAlign()), II.isVolatile());
       if (AATags)
         New->setAAMetadata(AATags);
       LLVM_DEBUG(dbgs() << "          to: " << *New << "\n");
@@ -3104,7 +3121,7 @@ private:
         unsigned LoadAlign = LI->getAlignment();
         if (!LoadAlign)
           LoadAlign = DL.getABITypeAlignment(LI->getType());
-        LI->setAlignment(std::min(LoadAlign, getSliceAlign()));
+        LI->setAlignment(MaybeAlign(std::min(LoadAlign, getSliceAlign())));
         continue;
       }
       if (StoreInst *SI = dyn_cast<StoreInst>(I)) {
@@ -3113,7 +3130,7 @@ private:
           Value *Op = SI->getOperand(0);
           StoreAlign = DL.getABITypeAlignment(Op->getType());
         }
-        SI->setAlignment(std::min(StoreAlign, getSliceAlign()));
+        SI->setAlignment(MaybeAlign(std::min(StoreAlign, getSliceAlign())));
         continue;
       }
 
@@ -3206,7 +3223,7 @@ class AggLoadStoreRewriter : public InstVisitor<AggLoadStoreRewriter, bool> {
 
   /// The current pointer use being rewritten. This is used to dig up the used
   /// value (as opposed to the user).
-  Use *U;
+  Use *U = nullptr;
 
   /// Used to calculate offsets, and hence alignment, of subobjects.
   const DataLayout &DL;
@@ -4136,20 +4153,19 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
     // FIXME: We might want to defer PHI speculation until after here.
     // FIXME: return nullptr;
   } else {
-    unsigned Alignment = AI.getAlignment();
-    if (!Alignment) {
-      // The minimum alignment which users can rely on when the explicit
-      // alignment is omitted or zero is that required by the ABI for this
-      // type.
-      Alignment = DL.getABITypeAlignment(AI.getAllocatedType());
-    }
-    Alignment = MinAlign(Alignment, P.beginOffset());
+    // If alignment is unspecified we fallback on the one required by the ABI
+    // for this type. We also make sure the alignment is compatible with
+    // P.beginOffset().
+    const Align Alignment = commonAlignment(
+        DL.getValueOrABITypeAlignment(MaybeAlign(AI.getAlignment()),
+                                      AI.getAllocatedType()),
+        P.beginOffset());
     // If we will get at least this much alignment from the type alone, leave
     // the alloca's alignment unconstrained.
-    if (Alignment <= DL.getABITypeAlignment(SliceTy))
-      Alignment = 0;
+    const bool IsUnconstrained = Alignment <= DL.getABITypeAlignment(SliceTy);
     NewAI = new AllocaInst(
-      SliceTy, AI.getType()->getAddressSpace(), nullptr, Alignment,
+        SliceTy, AI.getType()->getAddressSpace(), nullptr,
+        IsUnconstrained ? MaybeAlign() : Alignment,
         AI.getName() + ".sroa." + Twine(P.begin() - AS.begin()), &AI);
     // Copy the old AI debug location over to the new one.
     NewAI->setDebugLoc(AI.getDebugLoc());

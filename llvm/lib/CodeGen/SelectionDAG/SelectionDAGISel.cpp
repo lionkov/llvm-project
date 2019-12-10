@@ -27,7 +27,10 @@
 #include "llvm/Analysis/BranchProbabilityInfo.h"
 #include "llvm/Analysis/CFG.h"
 #include "llvm/Analysis/EHPersonalities.h"
+#include "llvm/Analysis/LazyBlockFrequencyInfo.h"
+#include "llvm/Analysis/LegacyDivergenceAnalysis.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/Analysis/ProfileSummaryInfo.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
 #include "llvm/CodeGen/FastISel.h"
@@ -74,6 +77,7 @@
 #include "llvm/IR/Type.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/MC/MCRegisterInfo.h"
 #include "llvm/Pass.h"
@@ -146,16 +150,16 @@ static cl::opt<bool>
 ViewLegalizeTypesDAGs("view-legalize-types-dags", cl::Hidden,
           cl::desc("Pop up a window to show dags before legalize types"));
 static cl::opt<bool>
-ViewLegalizeDAGs("view-legalize-dags", cl::Hidden,
-          cl::desc("Pop up a window to show dags before legalize"));
+    ViewDAGCombineLT("view-dag-combine-lt-dags", cl::Hidden,
+                     cl::desc("Pop up a window to show dags before the post "
+                              "legalize types dag combine pass"));
+static cl::opt<bool>
+    ViewLegalizeDAGs("view-legalize-dags", cl::Hidden,
+                     cl::desc("Pop up a window to show dags before legalize"));
 static cl::opt<bool>
 ViewDAGCombine2("view-dag-combine2-dags", cl::Hidden,
           cl::desc("Pop up a window to show dags before the second "
                    "dag combine pass"));
-static cl::opt<bool>
-ViewDAGCombineLT("view-dag-combine-lt-dags", cl::Hidden,
-          cl::desc("Pop up a window to show dags before the post legalize types"
-                   " dag combine pass"));
 static cl::opt<bool>
 ViewISelDAGs("view-isel-dags", cl::Hidden,
           cl::desc("Pop up a window to show isel dags as they are selected"));
@@ -166,12 +170,10 @@ static cl::opt<bool>
 ViewSUnitDAGs("view-sunit-dags", cl::Hidden,
       cl::desc("Pop up a window to show SUnit dags after they are processed"));
 #else
-static const bool ViewDAGCombine1 = false,
-                  ViewLegalizeTypesDAGs = false, ViewLegalizeDAGs = false,
-                  ViewDAGCombine2 = false,
-                  ViewDAGCombineLT = false,
-                  ViewISelDAGs = false, ViewSchedDAGs = false,
-                  ViewSUnitDAGs = false;
+static const bool ViewDAGCombine1 = false, ViewLegalizeTypesDAGs = false,
+                  ViewDAGCombineLT = false, ViewLegalizeDAGs = false,
+                  ViewDAGCombine2 = false, ViewISelDAGs = false,
+                  ViewSchedDAGs = false, ViewSUnitDAGs = false;
 #endif
 
 //===---------------------------------------------------------------------===//
@@ -304,23 +306,18 @@ void TargetLowering::AdjustInstrPostInstrSelection(MachineInstr &MI,
 // SelectionDAGISel code
 //===----------------------------------------------------------------------===//
 
-SelectionDAGISel::SelectionDAGISel(TargetMachine &tm,
-                                   CodeGenOpt::Level OL) :
-  MachineFunctionPass(ID), TM(tm),
-  FuncInfo(new FunctionLoweringInfo()),
-  SwiftError(new SwiftErrorValueTracking()),
-  CurDAG(new SelectionDAG(tm, OL)),
-  SDB(new SelectionDAGBuilder(*CurDAG, *FuncInfo, *SwiftError, OL)),
-  AA(), GFI(),
-  OptLevel(OL),
-  DAGSize(0) {
-    initializeGCModuleInfoPass(*PassRegistry::getPassRegistry());
-    initializeBranchProbabilityInfoWrapperPassPass(
-        *PassRegistry::getPassRegistry());
-    initializeAAResultsWrapperPassPass(*PassRegistry::getPassRegistry());
-    initializeTargetLibraryInfoWrapperPassPass(
-        *PassRegistry::getPassRegistry());
-  }
+SelectionDAGISel::SelectionDAGISel(TargetMachine &tm, CodeGenOpt::Level OL)
+    : MachineFunctionPass(ID), TM(tm), FuncInfo(new FunctionLoweringInfo()),
+      SwiftError(new SwiftErrorValueTracking()),
+      CurDAG(new SelectionDAG(tm, OL)),
+      SDB(new SelectionDAGBuilder(*CurDAG, *FuncInfo, *SwiftError, OL)), AA(),
+      GFI(), OptLevel(OL), DAGSize(0) {
+  initializeGCModuleInfoPass(*PassRegistry::getPassRegistry());
+  initializeBranchProbabilityInfoWrapperPassPass(
+      *PassRegistry::getPassRegistry());
+  initializeAAResultsWrapperPassPass(*PassRegistry::getPassRegistry());
+  initializeTargetLibraryInfoWrapperPassPass(*PassRegistry::getPassRegistry());
+}
 
 SelectionDAGISel::~SelectionDAGISel() {
   delete SDB;
@@ -339,6 +336,8 @@ void SelectionDAGISel::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<TargetTransformInfoWrapperPass>();
   if (UseMBPI && OptLevel != CodeGenOpt::None)
     AU.addRequired<BranchProbabilityInfoWrapperPass>();
+  AU.addRequired<ProfileSummaryInfoWrapperPass>();
+  LazyBlockFrequencyInfoPass::getLazyBFIAnalysisUsage(AU);
   MachineFunctionPass::getAnalysisUsage(AU);
 }
 
@@ -386,7 +385,7 @@ static void SplitCriticalSideEffectEdges(Function &Fn, DominatorTree *DT,
 static void computeUsesMSVCFloatingPoint(const Triple &TT, const Function &F,
                                          MachineModuleInfo &MMI) {
   // Only needed for MSVC
-  if (!TT.isKnownWindowsMSVCEnvironment())
+  if (!TT.isWindowsMSVCEnvironment())
     return;
 
   // If it's already set, nothing to do.
@@ -434,20 +433,24 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
   TII = MF->getSubtarget().getInstrInfo();
   TLI = MF->getSubtarget().getTargetLowering();
   RegInfo = &MF->getRegInfo();
-  LibInfo = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI();
+  LibInfo = &getAnalysis<TargetLibraryInfoWrapperPass>().getTLI(Fn);
   GFI = Fn.hasGC() ? &getAnalysis<GCModuleInfo>().getFunctionInfo(Fn) : nullptr;
-  ORE = make_unique<OptimizationRemarkEmitter>(&Fn);
+  ORE = std::make_unique<OptimizationRemarkEmitter>(&Fn);
   auto *DTWP = getAnalysisIfAvailable<DominatorTreeWrapperPass>();
   DominatorTree *DT = DTWP ? &DTWP->getDomTree() : nullptr;
   auto *LIWP = getAnalysisIfAvailable<LoopInfoWrapperPass>();
   LoopInfo *LI = LIWP ? &LIWP->getLoopInfo() : nullptr;
+  auto *PSI = &getAnalysis<ProfileSummaryInfoWrapperPass>().getPSI();
+  auto *BFI = (PSI && PSI->hasProfileSummary()) ?
+              &getAnalysis<LazyBlockFrequencyInfoPass>().getBFI() :
+              nullptr;
 
   LLVM_DEBUG(dbgs() << "\n\n\n=== " << Fn.getName() << "\n");
 
   SplitCriticalSideEffectEdges(const_cast<Function &>(Fn), DT, LI);
 
   CurDAG->init(*MF, *ORE, this, LibInfo,
-   getAnalysisIfAvailable<LegacyDivergenceAnalysis>());
+               getAnalysisIfAvailable<LegacyDivergenceAnalysis>(), PSI, BFI);
   FuncInfo->set(Fn, *MF, CurDAG);
   SwiftError->setFunction(*MF);
 
@@ -524,8 +527,7 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
       To = J->second;
     }
     // Make sure the new register has a sufficiently constrained register class.
-    if (TargetRegisterInfo::isVirtualRegister(From) &&
-        TargetRegisterInfo::isVirtualRegister(To))
+    if (Register::isVirtualRegister(From) && Register::isVirtualRegister(To))
       MRI.constrainRegClass(To, MRI.getRegClass(From));
     // Replace it.
 
@@ -572,7 +574,7 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
     bool hasFI = MI->getOperand(0).isFI();
     Register Reg =
         hasFI ? TRI.getFrameRegister(*MF) : MI->getOperand(0).getReg();
-    if (TargetRegisterInfo::isPhysicalRegister(Reg))
+    if (Register::isPhysicalRegister(Reg))
       EntryMBB->insert(EntryMBB->begin(), MI);
     else {
       MachineInstr *Def = RegInfo->getVRegDef(Reg);
@@ -582,7 +584,7 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
         Def->getParent()->insert(std::next(InsertPos), MI);
       } else
         LLVM_DEBUG(dbgs() << "Dropping debug info for dead vreg"
-                          << TargetRegisterInfo::virtReg2Index(Reg) << "\n");
+                          << Register::virtReg2Index(Reg) << "\n");
     }
 
     // If Reg is live-in then update debug info to track its copy in a vreg.
@@ -671,8 +673,7 @@ bool SelectionDAGISel::runOnMachineFunction(MachineFunction &mf) {
       To = J->second;
     }
     // Make sure the new register has a sufficiently constrained register class.
-    if (TargetRegisterInfo::isVirtualRegister(From) &&
-        TargetRegisterInfo::isVirtualRegister(To))
+    if (Register::isVirtualRegister(From) && Register::isVirtualRegister(To))
       MRI.constrainRegClass(To, MRI.getRegClass(From));
     // Replace it.
 
@@ -760,7 +761,7 @@ void SelectionDAGISel::ComputeLiveOutVRegInfo() {
       continue;
 
     unsigned DestReg = cast<RegisterSDNode>(N->getOperand(1))->getReg();
-    if (!TargetRegisterInfo::isVirtualRegister(DestReg))
+    if (!Register::isVirtualRegister(DestReg))
       continue;
 
     // Ignore non-integer values.
@@ -794,8 +795,8 @@ void SelectionDAGISel::CodeGenAndEmitDAG() {
                        FuncInfo->MBB->getBasicBlock()->getName());
 #endif
 #ifdef NDEBUG
-  if (ViewDAGCombine1 || ViewLegalizeTypesDAGs || ViewLegalizeDAGs ||
-      ViewDAGCombine2 || ViewDAGCombineLT || ViewISelDAGs || ViewSchedDAGs ||
+  if (ViewDAGCombine1 || ViewLegalizeTypesDAGs || ViewDAGCombineLT ||
+      ViewLegalizeDAGs || ViewDAGCombine2 || ViewISelDAGs || ViewSchedDAGs ||
       ViewSUnitDAGs)
 #endif
   {
@@ -1160,9 +1161,9 @@ void SelectionDAGISel::DoInstructionSelection() {
       // we convert them to normal FP opcodes instead at this point.  This
       // will allow them to be handled by existing target-specific instruction
       // selectors.
-      if (Node->isStrictFPOpcode() &&
+      if (!TLI->isStrictFPEnabled() && Node->isStrictFPOpcode() &&
           (TLI->getOperationAction(Node->getOpcode(), Node->getValueType(0))
-           != TargetLowering::Legal))
+           == TargetLowering::Expand))
         Node = CurDAG->mutateStrictFPToFP(Node);
 
       LLVM_DEBUG(dbgs() << "\nISEL: Starting selection on root node: ";
@@ -1590,7 +1591,7 @@ void SelectionDAGISel::SelectAllBasicBlocks(const Function &Fn) {
       // But if FastISel was run, we already selected some of the block.
       // If we emitted a tail-call, we need to delete any previously emitted
       // instruction that follows it.
-      if (HadTailCall && FuncInfo->InsertPt != FuncInfo->MBB->end())
+      if (FastIS && HadTailCall && FuncInfo->InsertPt != FuncInfo->MBB->end())
         FastIS->removeDeadCode(FuncInfo->InsertPt, FuncInfo->MBB->end());
     }
 
@@ -1652,9 +1653,8 @@ static bool MIIsInTerminatorSequence(const MachineInstr &MI) {
 
   // Make sure that the copy dest is not a vreg when the copy source is a
   // physical register.
-  if (!OPI2->isReg() ||
-      (!TargetRegisterInfo::isPhysicalRegister(OPI->getReg()) &&
-       TargetRegisterInfo::isPhysicalRegister(OPI2->getReg())))
+  if (!OPI2->isReg() || (!Register::isPhysicalRegister(OPI->getReg()) &&
+                         Register::isPhysicalRegister(OPI2->getReg())))
     return false;
 
   return true;
@@ -2234,9 +2234,9 @@ void SelectionDAGISel::Select_READ_REGISTER(SDNode *Op) {
   SDLoc dl(Op);
   MDNodeSDNode *MD = dyn_cast<MDNodeSDNode>(Op->getOperand(1));
   const MDString *RegStr = dyn_cast<MDString>(MD->getMD()->getOperand(0));
-  unsigned Reg =
+  Register Reg =
       TLI->getRegisterByName(RegStr->getString().data(), Op->getValueType(0),
-                             *CurDAG);
+                             CurDAG->getMachineFunction());
   SDValue New = CurDAG->getCopyFromReg(
                         Op->getOperand(0), dl, Reg, Op->getValueType(0));
   New->setNodeId(-1);
@@ -2248,9 +2248,9 @@ void SelectionDAGISel::Select_WRITE_REGISTER(SDNode *Op) {
   SDLoc dl(Op);
   MDNodeSDNode *MD = dyn_cast<MDNodeSDNode>(Op->getOperand(1));
   const MDString *RegStr = dyn_cast<MDString>(MD->getMD()->getOperand(0));
-  unsigned Reg = TLI->getRegisterByName(RegStr->getString().data(),
+  Register Reg = TLI->getRegisterByName(RegStr->getString().data(),
                                         Op->getOperand(2).getValueType(),
-                                        *CurDAG);
+                                        CurDAG->getMachineFunction());
   SDValue New = CurDAG->getCopyToReg(
                         Op->getOperand(0), dl, Reg, Op->getOperand(2));
   New->setNodeId(-1);
@@ -3178,13 +3178,19 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
     case OPC_CheckFoldableChainNode: {
       assert(NodeStack.size() != 1 && "No parent node");
       // Verify that all intermediate nodes between the root and this one have
-      // a single use.
+      // a single use (ignoring chains, which are handled in UpdateChains).
       bool HasMultipleUses = false;
-      for (unsigned i = 1, e = NodeStack.size()-1; i != e; ++i)
-        if (!NodeStack[i].getNode()->hasOneUse()) {
-          HasMultipleUses = true;
-          break;
-        }
+      for (unsigned i = 1, e = NodeStack.size()-1; i != e; ++i) {
+        unsigned NNonChainUses = 0;
+        SDNode *NS = NodeStack[i].getNode();
+        for (auto UI = NS->use_begin(), UE = NS->use_end(); UI != UE; ++UI)
+          if (UI.getUse().getValueType() != MVT::Other)
+            if (++NNonChainUses > 1) {
+              HasMultipleUses = true;
+              break;
+            }
+        if (HasMultipleUses) break;
+      }
       if (HasMultipleUses) break;
 
       // Check to see that the target thinks this is profitable to fold and that
@@ -3323,10 +3329,13 @@ void SelectionDAGISel::SelectCodeCommon(SDNode *NodeToMatch,
       continue;
     }
 
-    case OPC_EmitCopyToReg: {
+    case OPC_EmitCopyToReg:
+    case OPC_EmitCopyToReg2: {
       unsigned RecNo = MatcherTable[MatcherIndex++];
       assert(RecNo < RecordedNodes.size() && "Invalid EmitCopyToReg");
       unsigned DestPhysReg = MatcherTable[MatcherIndex++];
+      if (Opcode == OPC_EmitCopyToReg2)
+        DestPhysReg |= MatcherTable[MatcherIndex++] << 8;
 
       if (!InputChain.getNode())
         InputChain = CurDAG->getEntryNode();

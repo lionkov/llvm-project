@@ -66,11 +66,6 @@ INSERT-ARRAY: INSERTVAL: Invalid array index
 INSERT-STRUCT: INSERTVAL: Invalid struct index
 INSERT-IDXS: INSERTVAL: Invalid type
 
-RUN: not llvm-dis -disable-output %p/Inputs/invalid-no-proper-module.bc 2>&1 | \
-RUN:   FileCheck --check-prefix=NO-MODULE %s
-
-NO-MODULE: Expected a single module
-
 RUN: not llvm-dis -disable-output %p/Inputs/invalid-fp-shift.bc 2>&1 | \
 RUN:   FileCheck --check-prefix=FP-SHIFT %s
 
@@ -235,3 +230,8 @@ RUN: not llvm-dis -disable-output %p/Inputs/invalid-nonpointer-atomicrmw.bc 2>&1
 RUN:   FileCheck --check-prefix=NONPOINTER-ATOMICRMW %s
 
 NONPOINTER-ATOMICRMW: Invalid record
+
+RUN: not llvm-dis -disable-output %p/Inputs/invalid-fcmp-opnum.bc 2>&1 | \
+RUN:   FileCheck --check-prefix=INVALID-FCMP-OPNUM %s
+
+INVALID-FCMP-OPNUM: Invalid record: operand number exceeded available operands

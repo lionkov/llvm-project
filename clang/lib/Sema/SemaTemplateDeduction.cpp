@@ -1486,7 +1486,7 @@ DeduceTemplateArgumentsByTypeMatch(Sema &S,
 #define NON_CANONICAL_TYPE(Class, Base) \
   case Type::Class: llvm_unreachable("deducing non-canonical type: " #Class);
 #define TYPE(Class, Base)
-#include "clang/AST/TypeNodes.def"
+#include "clang/AST/TypeNodes.inc"
 
     case Type::TemplateTypeParm:
     case Type::SubstTemplateTypeParmPack:
@@ -2591,6 +2591,23 @@ ConvertDeducedTemplateArgument(Sema &S, NamedDecl *Param,
   return ConvertArg(Arg, 0);
 }
 
+template<typename TemplateDeclT>
+static Sema::TemplateDeductionResult
+CheckDeducedArgumentConstraints(Sema& S, TemplateDeclT *Template,
+                                ArrayRef<TemplateArgument> DeducedArgs,
+                                TemplateDeductionInfo &Info) {
+  llvm::SmallVector<const Expr *, 3> AssociatedConstraints;
+  Template->getAssociatedConstraints(AssociatedConstraints);
+  if (S.CheckConstraintSatisfaction(Template, AssociatedConstraints,
+                                    DeducedArgs, Info.getLocation(),
+                                    Info.AssociatedConstraintsSatisfaction) ||
+      !Info.AssociatedConstraintsSatisfaction.IsSatisfied) {
+    Info.reset(TemplateArgumentList::CreateCopy(S.Context, DeducedArgs));
+    return Sema::TDK_ConstraintsNotSatisfied;
+  }
+  return Sema::TDK_Success;
+}
+
 // FIXME: This should not be a template, but
 // ClassTemplatePartialSpecializationDecl sadly does not derive from
 // TemplateDecl.
@@ -2688,6 +2705,10 @@ static Sema::TemplateDeductionResult ConvertDeducedTemplateArguments(
     // If we get here, we successfully used the default template argument.
   }
 
+  if (Sema::TemplateDeductionResult Result
+        = CheckDeducedArgumentConstraints(S, Template, Builder, Info))
+    return Result;
+
   return Sema::TDK_Success;
 }
 
@@ -2767,10 +2788,14 @@ FinishTemplateArgumentDeduction(
     return Sema::TDK_SubstitutionFailure;
   }
 
+  bool ConstraintsNotSatisfied;
   SmallVector<TemplateArgument, 4> ConvertedInstArgs;
   if (S.CheckTemplateArgumentList(Template, Partial->getLocation(), InstArgs,
-                                  false, ConvertedInstArgs))
-    return Sema::TDK_SubstitutionFailure;
+                                  false, ConvertedInstArgs,
+                                  /*UpdateArgsWithConversions=*/true,
+                                  &ConstraintsNotSatisfied))
+    return ConstraintsNotSatisfied ? Sema::TDK_ConstraintsNotSatisfied :
+                                     Sema::TDK_SubstitutionFailure;
 
   TemplateParameterList *TemplateParams = Template->getTemplateParameters();
   for (unsigned I = 0, E = TemplateParams->size(); I != E; ++I) {
@@ -2831,7 +2856,6 @@ static Sema::TemplateDeductionResult FinishTemplateArgumentDeduction(
   return Sema::TDK_Success;
 }
 
-
 /// Perform template argument deduction to determine whether
 /// the given template arguments match the given class template
 /// partial specialization per C++ [temp.class.spec.match].
@@ -2872,7 +2896,7 @@ Sema::DeduceTemplateArguments(ClassTemplatePartialSpecializationDecl *Partial,
     return Sema::TDK_SubstitutionFailure;
 
   return ::FinishTemplateArgumentDeduction(
-      *this, Partial, /*PartialOrdering=*/false, TemplateArgs, Deduced, Info);
+      *this, Partial, /*IsPartialOrdering=*/false, TemplateArgs, Deduced, Info);
 }
 
 /// Perform template argument deduction to determine whether
@@ -2913,7 +2937,7 @@ Sema::DeduceTemplateArguments(VarTemplatePartialSpecializationDecl *Partial,
     return Sema::TDK_SubstitutionFailure;
 
   return ::FinishTemplateArgumentDeduction(
-      *this, Partial, /*PartialOrdering=*/false, TemplateArgs, Deduced, Info);
+      *this, Partial, /*IsPartialOrdering=*/false, TemplateArgs, Deduced, Info);
 }
 
 /// Determine whether the given type T is a simple-template-id type.
@@ -3093,6 +3117,13 @@ Sema::SubstituteExplicitTemplateArguments(
                   Function->getTypeSpecStartLoc(), Function->getDeclName());
     if (ResultType.isNull() || Trap.hasErrorOccurred())
       return TDK_SubstitutionFailure;
+    // CUDA: Kernel function must have 'void' return type.
+    if (getLangOpts().CUDA)
+      if (Function->hasAttr<CUDAGlobalAttr>() && !ResultType->isVoidType()) {
+        Diag(Function->getLocation(), diag::err_kern_type_not_void_return)
+            << Function->getType() << Function->getSourceRange();
+        return TDK_SubstitutionFailure;
+      }
   }
 
   // Instantiate the types of each of the function parameters given the
@@ -3702,6 +3733,12 @@ static Sema::TemplateDeductionResult DeduceFromInitializerList(
     return Sema::TDK_Success;
   }
 
+  // Resolving a core issue: a braced-init-list containing any designators is
+  // a non-deduced context.
+  for (Expr *E : ILE->inits())
+    if (isa<DesignatedInitExpr>(E))
+      return Sema::TDK_Success;
+
   // Deduction only needs to be done for dependent types.
   if (ElTy->isDependentType()) {
     for (Expr *E : ILE->inits()) {
@@ -3813,8 +3850,7 @@ Sema::TemplateDeductionResult Sema::DeduceTemplateArguments(
   if (Args.size() < Function->getMinRequiredArguments() && !PartialOverloading)
     return TDK_TooFewArguments;
   else if (TooManyArguments(NumParams, Args.size(), PartialOverloading)) {
-    const FunctionProtoType *Proto
-      = Function->getType()->getAs<FunctionProtoType>();
+    const auto *Proto = Function->getType()->castAs<FunctionProtoType>();
     if (Proto->isTemplateVariadic())
       /* Do nothing */;
     else if (!Proto->isVariadic())
@@ -3952,11 +3988,8 @@ QualType Sema::adjustCCAndNoReturn(QualType ArgFunctionType,
   if (ArgFunctionType.isNull())
     return ArgFunctionType;
 
-  const FunctionProtoType *FunctionTypeP =
-      FunctionType->castAs<FunctionProtoType>();
-  const FunctionProtoType *ArgFunctionTypeP =
-      ArgFunctionType->getAs<FunctionProtoType>();
-
+  const auto *FunctionTypeP = FunctionType->castAs<FunctionProtoType>();
+  const auto *ArgFunctionTypeP = ArgFunctionType->castAs<FunctionProtoType>();
   FunctionProtoType::ExtProtoInfo EPI = ArgFunctionTypeP->getExtProtoInfo();
   bool Rebuild = false;
 
@@ -4509,6 +4542,12 @@ Sema::DeduceAutoType(TypeLoc Type, Expr *&Init, QualType &Result,
     if (!Type.getType().getNonReferenceType()->getAs<AutoType>())
       return DAR_Failed;
 
+    // Resolving a core issue: a braced-init-list containing any designators is
+    // a non-deduced context.
+    for (Expr *E : InitList->inits())
+      if (isa<DesignatedInitExpr>(E))
+        return DAR_Failed;
+
     SourceRange DeducedFromInitRange;
     for (unsigned i = 0, e = InitList->getNumInits(); i < e; ++i) {
       Expr *Init = InitList->getInit(i);
@@ -4632,8 +4671,11 @@ bool Sema::DeduceReturnType(FunctionDecl *FD, SourceLocation Loc,
 
       // We might need to deduce the return type by instantiating the definition
       // of the operator() function.
-      if (CallOp->getReturnType()->isUndeducedType())
-        InstantiateFunctionDefinition(Loc, CallOp);
+      if (CallOp->getReturnType()->isUndeducedType()) {
+        runWithSufficientStackSpace(Loc, [&] {
+          InstantiateFunctionDefinition(Loc, CallOp);
+        });
+      }
     }
 
     if (CallOp->isInvalidDecl())
@@ -4654,8 +4696,11 @@ bool Sema::DeduceReturnType(FunctionDecl *FD, SourceLocation Loc,
     return false;
   }
 
-  if (FD->getTemplateInstantiationPattern())
-    InstantiateFunctionDefinition(Loc, FD);
+  if (FD->getTemplateInstantiationPattern()) {
+    runWithSufficientStackSpace(Loc, [&] {
+      InstantiateFunctionDefinition(Loc, FD);
+    });
+  }
 
   bool StillUndeduced = FD->getReturnType()->isUndeducedType();
   if (StillUndeduced && Diagnose && !FD->isInvalidDecl()) {
@@ -5028,6 +5073,7 @@ template<typename TemplateLikeDecl>
 static bool isAtLeastAsSpecializedAs(Sema &S, QualType T1, QualType T2,
                                      TemplateLikeDecl *P2,
                                      TemplateDeductionInfo &Info) {
+  // TODO: Concepts: Regard constraints
   // C++ [temp.class.order]p1:
   //   For two class template partial specializations, the first is at least as
   //   specialized as the second if, given the following rewrite to two
@@ -5067,7 +5113,7 @@ static bool isAtLeastAsSpecializedAs(Sema &S, QualType T1, QualType T2,
                                    Info);
   auto *TST1 = T1->castAs<TemplateSpecializationType>();
   if (FinishTemplateArgumentDeduction(
-          S, P2, /*PartialOrdering=*/true,
+          S, P2, /*IsPartialOrdering=*/true,
           TemplateArgumentList(TemplateArgumentList::OnStack,
                                TST1->template_arguments()),
           Deduced, Info))
@@ -5590,7 +5636,7 @@ MarkUsedTemplateParameters(ASTContext &Ctx, QualType T,
 #define ABSTRACT_TYPE(Class, Base)
 #define DEPENDENT_TYPE(Class, Base)
 #define NON_CANONICAL_TYPE(Class, Base) case Type::Class:
-#include "clang/AST/TypeNodes.def"
+#include "clang/AST/TypeNodes.inc"
     break;
   }
 }

@@ -41,7 +41,6 @@ public:
     FT_Dwarf,
     FT_DwarfFrame,
     FT_LEB,
-    FT_Padding,
     FT_SymbolId,
     FT_CVInlineLines,
     FT_CVDefRange,
@@ -79,8 +78,6 @@ private:
 protected:
   MCFragment(FragmentType Kind, bool HasInstructions,
              MCSection *Parent = nullptr);
-
-  ~MCFragment();
 
 public:
   MCFragment() = delete;
@@ -149,6 +146,7 @@ public:
     case MCFragment::FT_CompactEncodedInst:
     case MCFragment::FT_Data:
     case MCFragment::FT_Dwarf:
+    case MCFragment::FT_DwarfFrame:
       return true;
     }
   }
@@ -232,7 +230,8 @@ public:
   static bool classof(const MCFragment *F) {
     MCFragment::FragmentType Kind = F->getKind();
     return Kind == MCFragment::FT_Relaxable || Kind == MCFragment::FT_Data ||
-           Kind == MCFragment::FT_CVDefRange || Kind == MCFragment::FT_Dwarf;;
+           Kind == MCFragment::FT_CVDefRange || Kind == MCFragment::FT_Dwarf ||
+           Kind == MCFragment::FT_DwarfFrame;
   }
 };
 
@@ -329,98 +328,6 @@ public:
 
   static bool classof(const MCFragment *F) {
     return F->getKind() == MCFragment::FT_Align;
-  }
-};
-
-/// Fragment for adding required padding.
-/// This fragment is always inserted before an instruction, and holds that
-/// instruction as context information (as well as a mask of kinds) for
-/// determining the padding size.
-///
-class MCPaddingFragment : public MCFragment {
-  /// A mask containing all the kinds relevant to this fragment. i.e. the i'th
-  /// bit will be set iff kind i is relevant to this fragment.
-  uint64_t PaddingPoliciesMask;
-  /// A boolean indicating if this fragment will actually hold padding. If its
-  /// value is false, then this fragment serves only as a placeholder,
-  /// containing data to assist other insertion point in their decision making.
-  bool IsInsertionPoint;
-
-  uint64_t Size;
-
-  struct MCInstInfo {
-    bool IsInitialized;
-    MCInst Inst;
-    /// A boolean indicating whether the instruction pointed by this fragment is
-    /// a fixed size instruction or a relaxable instruction held by a
-    /// MCRelaxableFragment.
-    bool IsImmutableSizedInst;
-    union {
-      /// If the instruction is a fixed size instruction, hold its size.
-      size_t InstSize;
-      /// Otherwise, hold a pointer to the MCRelaxableFragment holding it.
-      MCRelaxableFragment *InstFragment;
-    };
-  };
-  MCInstInfo InstInfo;
-
-public:
-  static const uint64_t PFK_None = UINT64_C(0);
-
-  enum MCPaddingFragmentKind {
-    // values 0-7 are reserved for future target independet values.
-
-    FirstTargetPerfNopFragmentKind = 8,
-
-    /// Limit range of target MCPerfNopFragment kinds to fit in uint64_t
-    MaxTargetPerfNopFragmentKind = 63
-  };
-
-  MCPaddingFragment(MCSection *Sec = nullptr)
-      : MCFragment(FT_Padding, false, Sec), PaddingPoliciesMask(PFK_None),
-        IsInsertionPoint(false), Size(UINT64_C(0)),
-        InstInfo({false, MCInst(), false, {0}}) {}
-
-  bool isInsertionPoint() const { return IsInsertionPoint; }
-  void setAsInsertionPoint() { IsInsertionPoint = true; }
-  uint64_t getPaddingPoliciesMask() const { return PaddingPoliciesMask; }
-  void setPaddingPoliciesMask(uint64_t Value) { PaddingPoliciesMask = Value; }
-  bool hasPaddingPolicy(uint64_t PolicyMask) const {
-    assert(isPowerOf2_64(PolicyMask) &&
-           "Policy mask must contain exactly one policy");
-    return (getPaddingPoliciesMask() & PolicyMask) != PFK_None;
-  }
-  const MCInst &getInst() const {
-    assert(isInstructionInitialized() && "Fragment has no instruction!");
-    return InstInfo.Inst;
-  }
-  size_t getInstSize() const {
-    assert(isInstructionInitialized() && "Fragment has no instruction!");
-    if (InstInfo.IsImmutableSizedInst)
-      return InstInfo.InstSize;
-    assert(InstInfo.InstFragment != nullptr &&
-           "Must have a valid InstFragment to retrieve InstSize from");
-    return InstInfo.InstFragment->getContents().size();
-  }
-  void setInstAndInstSize(const MCInst &Inst, size_t InstSize) {
-	InstInfo.IsInitialized = true;
-    InstInfo.IsImmutableSizedInst = true;
-    InstInfo.Inst = Inst;
-    InstInfo.InstSize = InstSize;
-  }
-  void setInstAndInstFragment(const MCInst &Inst,
-                              MCRelaxableFragment *InstFragment) {
-    InstInfo.IsInitialized = true;
-    InstInfo.IsImmutableSizedInst = false;
-    InstInfo.Inst = Inst;
-    InstInfo.InstFragment = InstFragment;
-  }
-  uint64_t getSize() const { return Size; }
-  void setSize(uint64_t Value) { Size = Value; }
-  bool isInstructionInitialized() const { return InstInfo.IsInitialized; }
-
-  static bool classof(const MCFragment *F) {
-    return F->getKind() == MCFragment::FT_Padding;
   }
 };
 
@@ -543,26 +450,20 @@ public:
   }
 };
 
-class MCDwarfCallFrameFragment : public MCFragment {
+class MCDwarfCallFrameFragment : public MCEncodedFragmentWithFixups<8, 1> {
   /// AddrDelta - The expression for the difference of the two symbols that
   /// make up the address delta between two .cfi_* dwarf directives.
   const MCExpr *AddrDelta;
 
-  SmallString<8> Contents;
-
 public:
   MCDwarfCallFrameFragment(const MCExpr &AddrDelta, MCSection *Sec = nullptr)
-      : MCFragment(FT_DwarfFrame, false, Sec), AddrDelta(&AddrDelta) {
-    Contents.push_back(0);
-  }
+      : MCEncodedFragmentWithFixups<8, 1>(FT_DwarfFrame, false, Sec),
+        AddrDelta(&AddrDelta) {}
 
   /// \name Accessors
   /// @{
 
   const MCExpr &getAddrDelta() const { return *AddrDelta; }
-
-  SmallString<8> &getContents() { return Contents; }
-  const SmallString<8> &getContents() const { return Contents; }
 
   /// @}
 

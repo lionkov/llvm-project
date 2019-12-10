@@ -25,7 +25,7 @@
 namespace clang {
 namespace clangd {
 
-/// \brief Collect declarations (symbols) from an AST.
+/// Collect declarations (symbols) from an AST.
 /// It collects most declarations except:
 /// - Implicit declarations
 /// - Anonymous declarations (anonymous enum/class/struct, etc)
@@ -112,6 +112,11 @@ public:
   RefSlab takeRefs() { return std::move(Refs).build(); }
   RelationSlab takeRelations() { return std::move(Relations).build(); }
 
+  /// Returns true if we are interested in references and declarations from \p
+  /// FID. If this function return false, bodies of functions inside those files
+  /// will be skipped to decrease indexing time.
+  bool shouldIndexFile(FileID FID);
+
   void finish() override;
 
 private:
@@ -134,9 +139,10 @@ private:
   void setIncludeLocation(const Symbol &S, SourceLocation);
   // Indexed macros, to be erased if they turned out to be include guards.
   llvm::DenseSet<const IdentifierInfo *> IndexedMacros;
-  // All refs collected from the AST.
-  // Only symbols declared in preamble (from #include) and referenced from the
-  // main file will be included.
+  // All refs collected from the AST. It includes:
+  //   1) symbols declared in the preamble and referenced from the main file (
+  //     which is not a header), or
+  //   2) symbols declared and referenced from the main file (which is a header)
   RefSlab::Builder Refs;
   // All relations collected from the AST.
   RelationSlab::Builder Relations;
@@ -145,11 +151,12 @@ private:
   std::shared_ptr<GlobalCodeCompletionAllocator> CompletionAllocator;
   std::unique_ptr<CodeCompletionTUInfo> CompletionTUInfo;
   Options Opts;
-  using DeclRef = std::pair<SourceLocation, index::SymbolRoleSet>;
+  using SymbolRef = std::pair<SourceLocation, index::SymbolRoleSet>;
   // Symbols referenced from the current TU, flushed on finish().
   llvm::DenseSet<const NamedDecl *> ReferencedDecls;
   llvm::DenseSet<const IdentifierInfo *> ReferencedMacros;
-  llvm::DenseMap<const NamedDecl *, std::vector<DeclRef>> DeclRefs;
+  llvm::DenseMap<const NamedDecl *, std::vector<SymbolRef>> DeclRefs;
+  llvm::DenseMap<SymbolID, std::vector<SymbolRef>> MacroRefs;
   // Maps canonical declaration provided by clang to canonical declaration for
   // an index symbol, if clangd prefers a different declaration than that
   // provided by clang. For example, friend declaration might be considered

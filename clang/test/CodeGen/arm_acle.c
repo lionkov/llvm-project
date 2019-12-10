@@ -2,6 +2,11 @@
 // RUN: %clang_cc1 -ffreestanding -triple armv8-eabi -target-cpu cortex-a57 -O2  -fexperimental-new-pass-manager -S -emit-llvm -o - %s | FileCheck %s -check-prefix=ARM -check-prefix=AArch32 -check-prefix=ARM-NEWPM -check-prefix=AArch32-NEWPM
 // RUN: %clang_cc1 -ffreestanding -triple aarch64-eabi -target-cpu cortex-a57 -target-feature +neon -target-feature +crc -target-feature +crypto -O2 -fno-experimental-new-pass-manager -S -emit-llvm -o - %s | FileCheck %s -check-prefix=ARM -check-prefix=AArch64 -check-prefix=ARM-LEGACY -check-prefix=AArch64-LEGACY
 // RUN: %clang_cc1 -ffreestanding -triple aarch64-eabi -target-cpu cortex-a57 -target-feature +neon -target-feature +crc -target-feature +crypto -O2 -fexperimental-new-pass-manager -S -emit-llvm -o - %s | FileCheck %s -check-prefix=ARM -check-prefix=AArch64 -check-prefix=ARM-NEWPM -check-prefix=AArch64-NEWPM
+// RUN: %clang_cc1 -ffreestanding -triple aarch64-eabi -target-cpu cortex-a57 -target-feature +v8.3a -O2 -fexperimental-new-pass-manager -S -emit-llvm -o - %s | FileCheck %s -check-prefix=AArch64-v8_3
+// RUN: %clang_cc1 -ffreestanding -triple aarch64-eabi -target-cpu cortex-a57 -target-feature +v8.4a -O2 -fexperimental-new-pass-manager -S -emit-llvm -o - %s | FileCheck %s -check-prefix=AArch64-v8_3
+// RUN: %clang_cc1 -ffreestanding -triple aarch64-eabi -target-cpu cortex-a57 -target-feature +v8.5a -O2 -fexperimental-new-pass-manager -S -emit-llvm -o - %s | FileCheck %s -check-prefix=AArch64-v8_3
+
+// REQUIRES: rewrite
 
 #include <arm_acle.h>
 
@@ -85,28 +90,28 @@ void test_swp(uint32_t x, volatile void *p) {
 /* 8.6 Memory prefetch intrinsics */
 /* 8.6.1 Data prefetch */
 // ARM-LABEL: test_pld
-// ARM: call void @llvm.prefetch(i8* null, i32 0, i32 3, i32 1)
+// ARM: call void @llvm.prefetch.p0i8(i8* null, i32 0, i32 3, i32 1)
 void test_pld() {
   __pld(0);
 }
 
 // ARM-LABEL: test_pldx
-// AArch32: call void @llvm.prefetch(i8* null, i32 1, i32 3, i32 1)
-// AArch64: call void @llvm.prefetch(i8* null, i32 1, i32 1, i32 1)
+// AArch32: call void @llvm.prefetch.p0i8(i8* null, i32 1, i32 3, i32 1)
+// AArch64: call void @llvm.prefetch.p0i8(i8* null, i32 1, i32 1, i32 1)
 void test_pldx() {
   __pldx(1, 2, 0, 0);
 }
 
 /* 8.6.2 Instruction prefetch */
 // ARM-LABEL: test_pli
-// ARM: call void @llvm.prefetch(i8* null, i32 0, i32 3, i32 0)
+// ARM: call void @llvm.prefetch.p0i8(i8* null, i32 0, i32 3, i32 0)
 void test_pli() {
   __pli(0);
 }
 
 // ARM-LABEL: test_plix
-// AArch32: call void @llvm.prefetch(i8* null, i32 0, i32 3, i32 0)
-// AArch64: call void @llvm.prefetch(i8* null, i32 0, i32 1, i32 0)
+// AArch32: call void @llvm.prefetch.p0i8(i8* null, i32 0, i32 3, i32 0)
+// AArch64: call void @llvm.prefetch.p0i8(i8* null, i32 0, i32 1, i32 0)
 void test_plix() {
   __plix(2, 0, 0);
 }
@@ -168,6 +173,24 @@ long test_clzl(long t) {
 // ARM: call i64 @llvm.ctlz.i64(i64 %t, i1 false)
 uint64_t test_clzll(uint64_t t) {
   return __clzll(t);
+}
+
+// ARM-LABEL: test_cls
+// ARM: call i32 @llvm.arm.cls(i32 %t)
+unsigned test_cls(uint32_t t) {
+  return __cls(t);
+}
+
+// ARM-LABEL: test_clsl
+// AArch32: call i32 @llvm.arm.cls(i32 %t)
+// AArch64: call i32 @llvm.arm.cls64(i64 %t)
+unsigned test_clsl(unsigned long t) {
+  return __clsl(t);
+}
+// ARM-LABEL: test_clsll
+// ARM: call i32 @llvm.arm.cls64(i64 %t)
+unsigned test_clsll(uint64_t t) {
+  return __clsll(t);
 }
 
 // ARM-LABEL: test_rev
@@ -817,9 +840,66 @@ void test_wsrp(void *v) {
   __arm_wsrp("sysreg", v);
 }
 
+// ARM-LABEL: test_rsrf
+// AArch64: call i64 @llvm.read_register.i64(metadata ![[M0:[0-9]]])
+// AArch32: call i32 @llvm.read_register.i32(metadata ![[M2:[0-9]]])
+// ARM-NOT: uitofp
+// ARM: bitcast
+float test_rsrf() {
+#ifdef __ARM_32BIT_STATE
+  return __arm_rsrf("cp1:2:c3:c4:5");
+#else
+  return __arm_rsrf("1:2:3:4:5");
+#endif
+}
+// ARM-LABEL: test_rsrf64
+// AArch64: call i64 @llvm.read_register.i64(metadata ![[M0:[0-9]]])
+// AArch32: call i64 @llvm.read_register.i64(metadata ![[M3:[0-9]]])
+// ARM-NOT: uitofp
+// ARM: bitcast
+double test_rsrf64() {
+#ifdef __ARM_32BIT_STATE
+  return __arm_rsrf64("cp1:2:c3");
+#else
+  return __arm_rsrf64("1:2:3:4:5");
+#endif
+}
+// ARM-LABEL: test_wsrf
+// ARM-NOT: fptoui
+// ARM: bitcast
+// AArch64: call void @llvm.write_register.i64(metadata ![[M0:[0-9]]], i64 %{{.*}})
+// AArch32: call void @llvm.write_register.i32(metadata ![[M2:[0-9]]], i32 %{{.*}})
+void test_wsrf(float v) {
+#ifdef __ARM_32BIT_STATE
+  __arm_wsrf("cp1:2:c3:c4:5", v);
+#else
+  __arm_wsrf("1:2:3:4:5", v);
+#endif
+}
+// ARM-LABEL: test_wsrf64
+// ARM-NOT: fptoui
+// ARM: bitcast
+// AArch64: call void @llvm.write_register.i64(metadata ![[M0:[0-9]]], i64 %{{.*}})
+// AArch32: call void @llvm.write_register.i64(metadata ![[M3:[0-9]]], i64 %{{.*}})
+void test_wsrf64(double v) {
+#ifdef __ARM_32BIT_STATE
+  __arm_wsrf64("cp1:2:c3", v);
+#else
+  __arm_wsrf64("1:2:3:4:5", v);
+#endif
+}
+
 // AArch32: ![[M2]] = !{!"cp1:2:c3:c4:5"}
 // AArch32: ![[M3]] = !{!"cp1:2:c3"}
 // AArch32: ![[M4]] = !{!"sysreg"}
 
 // AArch64: ![[M0]] = !{!"1:2:3:4:5"}
 // AArch64: ![[M1]] = !{!"sysreg"}
+
+// AArch64-v8_3-LABEL: @test_jcvt(
+// AArch64-v8_3: call i32 @llvm.aarch64.fjcvtzs
+#ifdef __ARM_64BIT_STATE
+int32_t test_jcvt(double v) {
+  return __jcvt(v);
+}
+#endif
