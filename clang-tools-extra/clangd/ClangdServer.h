@@ -11,12 +11,12 @@
 
 #include "../clang-tidy/ClangTidyOptions.h"
 #include "Cancellation.h"
-#include "ClangdUnit.h"
 #include "CodeComplete.h"
 #include "FSProvider.h"
 #include "FormattedString.h"
 #include "Function.h"
 #include "GlobalCompilationDatabase.h"
+#include "Hover.h"
 #include "Protocol.h"
 #include "SemanticHighlighting.h"
 #include "TUScheduler.h"
@@ -24,6 +24,7 @@
 #include "index/Background.h"
 #include "index/FileIndex.h"
 #include "index/Index.h"
+#include "refactor/Rename.h"
 #include "refactor/Tweak.h"
 #include "clang/Tooling/CompilationDatabase.h"
 #include "clang/Tooling/Core/Replacement.h"
@@ -98,10 +99,6 @@ public:
     /// If true, ClangdServer automatically indexes files in the current project
     /// on background threads. The index is stored in the project root.
     bool BackgroundIndex = false;
-    /// If set to non-zero, the background index rebuilds the symbol index
-    /// periodically every BuildIndexPeriodMs milliseconds; otherwise, the
-    /// symbol index will be updated for each indexed file.
-    size_t BackgroundIndexRebuildPeriodMs = 0;
 
     /// If set, use this index to augment code completion results.
     SymbolIndex *StaticIndex = nullptr;
@@ -130,16 +127,20 @@ public:
 
     bool SuggestMissingIncludes = false;
 
-    /// Enable hidden features mostly useful to clangd developers.
-    /// e.g. tweaks to dump the AST.
-    bool HiddenFeatures = false;
-
     /// Clangd will execute compiler drivers matching one of these globs to
     /// fetch system include path.
     std::vector<std::string> QueryDriverGlobs;
 
     /// Enable semantic highlighting features.
     bool SemanticHighlighting = false;
+
+    /// Enable cross-file rename feature.
+    bool CrossFileRename = false;
+
+    /// Returns true if the tweak should be enabled.
+    std::function<bool(const Tweak &)> TweakFilter = [](const Tweak &T) {
+      return !T.hidden(); // only enable non-hidden tweaks.
+    };
   };
   // Sensible default options for use in tests.
   // Features like indexing must be enabled if desired.
@@ -196,9 +197,10 @@ public:
   void locateSymbolAt(PathRef File, Position Pos,
                       Callback<std::vector<LocatedSymbol>> CB);
 
-  /// Helper function that returns a path to the corresponding source file when
-  /// given a header file and vice versa.
-  llvm::Optional<Path> switchSourceHeader(PathRef Path);
+  /// Switch to a corresponding source file when given a header file, and vice
+  /// versa.
+  void switchSourceHeader(PathRef Path,
+                          Callback<llvm::Optional<clangd::Path>> CB);
 
   /// Get document highlights for a given position.
   void findDocumentHighlights(PathRef File, Position Pos,
@@ -213,6 +215,11 @@ public:
                      TypeHierarchyDirection Direction,
                      Callback<llvm::Optional<TypeHierarchyItem>> CB);
 
+  /// Resolve type hierarchy item in the given direction.
+  void resolveTypeHierarchy(TypeHierarchyItem Item, int Resolve,
+                            TypeHierarchyDirection Direction,
+                            Callback<llvm::Optional<TypeHierarchyItem>> CB);
+
   /// Retrieve the top symbols from the workspace matching a query.
   void workspaceSymbols(StringRef Query, int Limit,
                         Callback<std::vector<SymbolInformation>> CB);
@@ -223,7 +230,7 @@ public:
 
   /// Retrieve locations for symbol references.
   void findReferences(PathRef File, Position Pos, uint32_t Limit,
-                      Callback<std::vector<Location>> CB);
+                      Callback<ReferencesResult> CB);
 
   /// Run formatting for \p Rng inside \p File with content \p Code.
   llvm::Expected<tooling::Replacements> formatRange(StringRef Code,
@@ -239,10 +246,17 @@ public:
                                                      PathRef File, Position Pos,
                                                      StringRef TriggerText);
 
+  /// Test the validity of a rename operation.
+  void prepareRename(PathRef File, Position Pos,
+                     Callback<llvm::Optional<Range>> CB);
+
   /// Rename all occurrences of the symbol at the \p Pos in \p File to
   /// \p NewName.
+  /// If WantFormat is false, the final TextEdit will be not formatted,
+  /// embedders could use this method to get all occurrences of the symbol (e.g.
+  /// highlighting them in prepare stage).
   void rename(PathRef File, Position Pos, llvm::StringRef NewName,
-              Callback<std::vector<TextEdit>> CB);
+              bool WantFormat, Callback<FileEdits> CB);
 
   struct TweakRef {
     std::string ID;    /// ID to pass for applyTweak.
@@ -268,6 +282,10 @@ public:
   /// Clangd extension - not part of official LSP.
   void symbolInfo(PathRef File, Position Pos,
                   Callback<std::vector<SymbolDetails>> CB);
+
+  /// Get semantic ranges around a specified position in a file.
+  void semanticRanges(PathRef File, Position Pos,
+                      Callback<std::vector<Range>> CB);
 
   /// Returns estimated memory usage for each of the currently open files.
   /// The order of results is unspecified.
@@ -312,8 +330,11 @@ private:
   // If this is true, suggest include insertion fixes for diagnostic errors that
   // can be caused by missing includes (e.g. member access in incomplete type).
   bool SuggestMissingIncludes = false;
-  bool EnableHiddenFeatures = false;
-  
+
+  bool CrossFileRename = false;
+
+  std::function<bool(const Tweak &)> TweakFilter;
+
   // GUARDED_BY(CachedCompletionFuzzyFindRequestMutex)
   llvm::StringMap<llvm::Optional<FuzzyFindRequest>>
       CachedCompletionFuzzyFindRequestByFile;

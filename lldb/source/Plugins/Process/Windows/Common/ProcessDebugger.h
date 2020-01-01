@@ -41,13 +41,15 @@ public:
   HANDLE m_initial_stop_event = nullptr;
   bool m_initial_stop_received = false;
   bool m_stop_at_entry;
-  std::map<lldb::tid_t, HostThread> m_new_threads;
+  std::map<lldb::tid_t, lldb::ThreadSP> m_new_threads;
   std::set<lldb::tid_t> m_exited_threads;
 };
 
 class ProcessDebugger {
 
 public:
+  virtual ~ProcessDebugger();
+
   virtual void OnExitProcess(uint32_t exit_code);
   virtual void OnDebuggerConnected(lldb::addr_t image_base);
   virtual ExceptionResult OnDebugException(bool first_chance,
@@ -66,10 +68,10 @@ protected:
   Status LaunchProcess(ProcessLaunchInfo &launch_info,
                        DebugDelegateSP delegate);
 
-  Status AttachProcess(const ProcessAttachInfo &attach_info,
+  Status AttachProcess(lldb::pid_t pid, const ProcessAttachInfo &attach_info,
                        DebugDelegateSP delegate);
 
-  Status DestroyProcess();
+  Status DestroyProcess(lldb::StateType process_state);
 
   Status HaltProcess(bool &caused_stop);
 

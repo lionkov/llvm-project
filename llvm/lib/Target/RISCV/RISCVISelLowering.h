@@ -48,7 +48,10 @@ enum NodeType : unsigned {
   // This is a more convenient semantic for producing dagcombines that remove
   // unnecessary GPR->FPR->GPR moves.
   FMV_W_X_RV64,
-  FMV_X_ANYEXTW_RV64
+  FMV_X_ANYEXTW_RV64,
+  // READ_CYCLE_WIDE - A read of the 64-bit cycle CSR on a 32-bit target
+  // (returns (Lo, Hi)). It takes a chain operand.
+  READ_CYCLE_WIDE
 };
 }
 
@@ -89,6 +92,10 @@ public:
   // This method returns the name of a target specific DAG node.
   const char *getTargetNodeName(unsigned Opcode) const override;
 
+  ConstraintType getConstraintType(StringRef Constraint) const override;
+
+  unsigned getInlineAsmMemConstraint(StringRef ConstraintCode) const override;
+
   std::pair<unsigned, const TargetRegisterClass *>
   getRegForInlineAsmConstraint(const TargetRegisterInfo *TRI,
                                StringRef Constraint, MVT VT) const override;
@@ -127,6 +134,25 @@ public:
   }
   bool isDesirableToCommuteWithShift(const SDNode *N,
                                      CombineLevel Level) const override;
+
+  /// If a physical register, this returns the register that receives the
+  /// exception address on entry to an EH pad.
+  unsigned
+  getExceptionPointerRegister(const Constant *PersonalityFn) const override;
+
+  /// If a physical register, this returns the register that receives the
+  /// exception typeid on entry to a landing pad.
+  unsigned
+  getExceptionSelectorRegister(const Constant *PersonalityFn) const override;
+
+  bool shouldExtendTypeInLibCall(EVT Type) const override;
+
+  /// Returns the register with the specified architectural or ABI name. This
+  /// method is necessary to lower the llvm.read_register.* and
+  /// llvm.write_register.* intrinsics. Allocatable registers must be reserved
+  /// with the clang -ffixed-xX flag for access to be allowed.
+  Register getRegisterByName(const char *RegName, EVT VT,
+                             const MachineFunction &MF) const override;
 
 private:
   void analyzeInputArgs(MachineFunction &MF, CCState &CCInfo,
@@ -191,6 +217,12 @@ private:
                                    Value *AlignedAddr, Value *CmpVal,
                                    Value *NewVal, Value *Mask,
                                    AtomicOrdering Ord) const override;
+
+  /// Generate error diagnostics if any register used by CC has been marked
+  /// reserved.
+  void validateCCReservedRegs(
+      const SmallVectorImpl<std::pair<llvm::Register, llvm::SDValue>> &Regs,
+      MachineFunction &MF) const;
 };
 }
 

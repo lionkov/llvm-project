@@ -39,7 +39,7 @@
 ///
 /// - LLVM bitstream is a space- and CPU- efficient binary format. Typically it
 ///   encodes LLVM IR ("bitcode"), but it can be a container for other data.
-///   Low-level reader/writer libraries are in Bitcode/Bitstream*.h
+///   Low-level reader/writer libraries are in Bitstream/Bitstream*.h
 ///
 //===---------------------------------------------------------------------===//
 
@@ -122,6 +122,8 @@ public:
   std::pair<iterator, bool> try_emplace(ObjectKey &&K, Ts &&... Args) {
     return M.try_emplace(std::move(K), std::forward<Ts>(Args)...);
   }
+  bool erase(StringRef K);
+  void erase(iterator I) { M.erase(I); }
 
   iterator find(StringRef K) { return M.find_as(K); }
   const_iterator find(StringRef K) const { return M.find_as(K); }
@@ -555,6 +557,9 @@ inline Object::Object(std::initializer_list<KV> Properties) {
 inline std::pair<Object::iterator, bool> Object::insert(KV E) {
   return try_emplace(std::move(E.K), std::move(E.V));
 }
+inline bool Object::erase(StringRef K) {
+  return M.erase(ObjectKey(K));
+}
 
 // Standard deserializers are provided for primitive types.
 // See comments on Value.
@@ -709,7 +714,7 @@ public:
 ///         J.attribute("timestamp", int64_t(E.Time));
 ///         J.attributeArray("participants", [&] {
 ///           for (const Participant &P : E.Participants)
-///             J.string(P.toString());
+///             J.value(P.toString());
 ///         });
 ///       });
 ///   });

@@ -18,10 +18,7 @@
 #include "kmp_itt.h"
 #include "kmp_lock.h"
 #include "kmp_stats.h"
-
-#if OMPT_SUPPORT
 #include "ompt-specific.h"
-#endif
 
 #define MAX_MESSAGE 512
 
@@ -244,8 +241,6 @@ void __kmpc_pop_num_threads(ident_t *loc, kmp_int32 global_tid) {
   /* the num_threads are automatically popped */
 }
 
-#if OMP_40_ENABLED
-
 void __kmpc_push_proc_bind(ident_t *loc, kmp_int32 global_tid,
                            kmp_int32 proc_bind) {
   KA_TRACE(20, ("__kmpc_push_proc_bind: enter T#%d proc_bind=%d\n", global_tid,
@@ -253,8 +248,6 @@ void __kmpc_push_proc_bind(ident_t *loc, kmp_int32 global_tid,
 
   __kmp_push_proc_bind(loc, global_tid, (kmp_proc_bind_t)proc_bind);
 }
-
-#endif /* OMP_40_ENABLED */
 
 /*!
 @ingroup PARALLEL
@@ -344,7 +337,6 @@ void __kmpc_fork_call(ident_t *loc, kmp_int32 argc, kmpc_micro microtask, ...) {
 #endif // KMP_STATS_ENABLED
 }
 
-#if OMP_40_ENABLED
 /*!
 @ingroup PARALLEL
 @param loc source location information
@@ -462,7 +454,6 @@ void __kmpc_fork_teams(ident_t *loc, kmp_int32 argc, kmpc_micro microtask,
   }
 #endif // KMP_STATS_ENABLED
 }
-#endif /* OMP_40_ENABLED */
 
 // I don't think this function should ever have been exported.
 // The __kmpc_ prefix was misapplied.  I'm fairly certain that no generated
@@ -516,20 +507,15 @@ void __kmpc_end_serialized_parallel(ident_t *loc, kmp_int32 global_tid) {
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
   this_thr = __kmp_threads[global_tid];
   serial_team = this_thr->th.th_serial_team;
 
-#if OMP_45_ENABLED
   kmp_task_team_t *task_team = this_thr->th.th_task_team;
-
   // we need to wait for the proxy tasks before finishing the thread
   if (task_team != NULL && task_team->tt.tt_found_proxy_tasks)
     __kmp_task_team_wait(this_thr, serial_team USE_ITT_BUILD_ARG(NULL));
-#endif
 
   KMP_MB();
   KMP_DEBUG_ASSERT(serial_team);
@@ -556,7 +542,8 @@ void __kmpc_end_serialized_parallel(ident_t *loc, kmp_int32 global_tid) {
     if (ompt_enabled.ompt_callback_parallel_end) {
       ompt_callbacks.ompt_callback(ompt_callback_parallel_end)(
           &(serial_team->t.ompt_team_info.parallel_data), parent_task_data,
-          ompt_parallel_invoker_program, OMPT_LOAD_RETURN_ADDRESS(global_tid));
+          ompt_parallel_invoker_program | ompt_parallel_team,
+          OMPT_LOAD_RETURN_ADDRESS(global_tid));
     }
     __ompt_lw_taskteam_unlink(this_thr);
     this_thr->th.ompt_thread_info.state = ompt_state_overhead;
@@ -584,9 +571,7 @@ void __kmpc_end_serialized_parallel(ident_t *loc, kmp_int32 global_tid) {
         serial_team->t.t_dispatch->th_disp_buffer->next;
     __kmp_free(disp_buffer);
   }
-#if OMP_50_ENABLED
   this_thr->th.th_def_allocator = serial_team->t.t_def_allocator; // restore
-#endif
 
   --serial_team->t.t_serialized;
   if (serial_team->t.t_serialized == 0) {
@@ -689,7 +674,8 @@ void __kmpc_flush(ident_t *loc) {
 #endif // KMP_COMPILER_ICC
   }
 #endif // KMP_MIC
-#elif (KMP_ARCH_ARM || KMP_ARCH_AARCH64 || KMP_ARCH_MIPS || KMP_ARCH_MIPS64)
+#elif (KMP_ARCH_ARM || KMP_ARCH_AARCH64 || KMP_ARCH_MIPS || KMP_ARCH_MIPS64 || \
+       KMP_ARCH_RISCV64)
 // Nothing to see here move along
 #elif KMP_ARCH_PPC64
 // Nothing needed here (we have a real MB above).
@@ -731,15 +717,12 @@ void __kmpc_barrier(ident_t *loc, kmp_int32 global_tid) {
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
   if (__kmp_env_consistency_check) {
     if (loc == 0) {
       KMP_WARNING(ConstructIdentInvalid); // ??? What does it mean for the user?
     }
-
     __kmp_check_barrier(global_tid, ct_barrier, loc);
   }
 
@@ -783,9 +766,7 @@ kmp_int32 __kmpc_master(ident_t *loc, kmp_int32 global_tid) {
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
   if (KMP_MASTER_GTID(global_tid)) {
     KMP_COUNT_BLOCK(OMP_MASTER);
@@ -877,9 +858,7 @@ void __kmpc_ordered(ident_t *loc, kmp_int32 gtid) {
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
 #if USE_ITT_BUILD
   __kmp_itt_ordered_prep(gtid);
@@ -1634,9 +1613,7 @@ kmp_int32 __kmpc_barrier_master(ident_t *loc, kmp_int32 global_tid) {
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
   if (__kmp_env_consistency_check)
     __kmp_check_barrier(global_tid, ct_barrier, loc);
@@ -1696,9 +1673,7 @@ kmp_int32 __kmpc_barrier_master_nowait(ident_t *loc, kmp_int32 global_tid) {
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
   if (__kmp_env_consistency_check) {
     if (loc == 0) {
@@ -1919,7 +1894,6 @@ int ompc_get_team_size(int level) {
   return __kmp_get_team_size(__kmp_entry_gtid(), level);
 }
 
-#if OMP_50_ENABLED
 /* OpenMP 5.0 Affinity Format API */
 
 void ompc_set_affinity_format(char const *format) {
@@ -1970,7 +1944,6 @@ size_t ompc_capture_affinity(char *buffer, size_t buf_size,
   __kmp_str_buf_free(&capture_buf);
   return num_required;
 }
-#endif /* OMP_50_ENABLED */
 
 void kmpc_set_stacksize(int arg) {
   // __kmp_aux_set_stacksize initializes the library if needed
@@ -3345,7 +3318,6 @@ __kmp_end_critical_section_reduce_block(ident_t *loc, kmp_int32 global_tid,
 #endif // KMP_USE_DYNAMIC_LOCK
 } // __kmp_end_critical_section_reduce_block
 
-#if OMP_40_ENABLED
 static __forceinline int
 __kmp_swap_teams_for_teams_reduction(kmp_info_t *th, kmp_team_t **team_p,
                                      int *task_state) {
@@ -3380,7 +3352,6 @@ __kmp_restore_swapped_teams(kmp_info_t *th, kmp_team_t *team, int task_state) {
   th->th.th_task_team = team->t.t_task_team[task_state];
   th->th.th_task_state = task_state;
 }
-#endif
 
 /* 2.a.i. Reduce Block without a terminating barrier */
 /*!
@@ -3407,11 +3378,9 @@ __kmpc_reduce_nowait(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
   KMP_COUNT_BLOCK(REDUCE_nowait);
   int retval = 0;
   PACKED_REDUCTION_METHOD_T packed_reduction_method;
-#if OMP_40_ENABLED
   kmp_info_t *th;
   kmp_team_t *team;
   int teams_swapped = 0, task_state;
-#endif
   KA_TRACE(10, ("__kmpc_reduce_nowait() enter: called T#%d\n", global_tid));
 
   // why do we need this initialization here at all?
@@ -3423,9 +3392,7 @@ __kmpc_reduce_nowait(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
 // check correctness of reduce block nesting
 #if KMP_USE_DYNAMIC_LOCK
@@ -3436,10 +3403,8 @@ __kmpc_reduce_nowait(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
     __kmp_push_sync(global_tid, ct_reduce, loc, NULL);
 #endif
 
-#if OMP_40_ENABLED
   th = __kmp_thread_from_gtid(global_tid);
   teams_swapped = __kmp_swap_teams_for_teams_reduction(th, &team, &task_state);
-#endif // OMP_40_ENABLED
 
   // packed_reduction_method value will be reused by __kmp_end_reduce* function,
   // the value should be kept in a variable
@@ -3461,12 +3426,17 @@ __kmpc_reduce_nowait(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
       loc, global_tid, num_vars, reduce_size, reduce_data, reduce_func, lck);
   __KMP_SET_REDUCTION_METHOD(global_tid, packed_reduction_method);
 
+  OMPT_REDUCTION_DECL(th, global_tid);
   if (packed_reduction_method == critical_reduce_block) {
+
+    OMPT_REDUCTION_BEGIN;
 
     __kmp_enter_critical_section_reduce_block(loc, global_tid, lck);
     retval = 1;
 
   } else if (packed_reduction_method == empty_reduce_block) {
+
+    OMPT_REDUCTION_BEGIN;
 
     // usage: if team size == 1, no synchronization is required ( Intel
     // platforms only )
@@ -3540,11 +3510,9 @@ __kmpc_reduce_nowait(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
     // should never reach this block
     KMP_ASSERT(0); // "unexpected method"
   }
-#if OMP_40_ENABLED
   if (teams_swapped) {
     __kmp_restore_swapped_teams(th, team, task_state);
   }
-#endif
   KA_TRACE(
       10,
       ("__kmpc_reduce_nowait() exit: called T#%d: method %08x, returns %08x\n",
@@ -3570,14 +3538,19 @@ void __kmpc_end_reduce_nowait(ident_t *loc, kmp_int32 global_tid,
 
   packed_reduction_method = __KMP_GET_REDUCTION_METHOD(global_tid);
 
+  OMPT_REDUCTION_DECL(__kmp_thread_from_gtid(global_tid), global_tid);
+
   if (packed_reduction_method == critical_reduce_block) {
 
     __kmp_end_critical_section_reduce_block(loc, global_tid, lck);
+    OMPT_REDUCTION_END;
 
   } else if (packed_reduction_method == empty_reduce_block) {
 
     // usage: if team size == 1, no synchronization is required ( on Intel
     // platforms only )
+
+    OMPT_REDUCTION_END;
 
   } else if (packed_reduction_method == atomic_reduce_block) {
 
@@ -3590,6 +3563,7 @@ void __kmpc_end_reduce_nowait(ident_t *loc, kmp_int32 global_tid,
                                    tree_reduce_block)) {
 
     // only master gets here
+    // OMPT: tree reduction is annotated in the barrier code
 
   } else {
 
@@ -3630,11 +3604,9 @@ kmp_int32 __kmpc_reduce(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
   KMP_COUNT_BLOCK(REDUCE_wait);
   int retval = 0;
   PACKED_REDUCTION_METHOD_T packed_reduction_method;
-#if OMP_40_ENABLED
   kmp_info_t *th;
   kmp_team_t *team;
   int teams_swapped = 0, task_state;
-#endif
 
   KA_TRACE(10, ("__kmpc_reduce() enter: called T#%d\n", global_tid));
 
@@ -3647,9 +3619,7 @@ kmp_int32 __kmpc_reduce(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
   if (!TCR_4(__kmp_init_parallel))
     __kmp_parallel_initialize();
 
-#if OMP_50_ENABLED
   __kmp_resume_if_soft_paused();
-#endif
 
 // check correctness of reduce block nesting
 #if KMP_USE_DYNAMIC_LOCK
@@ -3660,22 +3630,24 @@ kmp_int32 __kmpc_reduce(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
     __kmp_push_sync(global_tid, ct_reduce, loc, NULL);
 #endif
 
-#if OMP_40_ENABLED
   th = __kmp_thread_from_gtid(global_tid);
   teams_swapped = __kmp_swap_teams_for_teams_reduction(th, &team, &task_state);
-#endif // OMP_40_ENABLED
 
   packed_reduction_method = __kmp_determine_reduction_method(
       loc, global_tid, num_vars, reduce_size, reduce_data, reduce_func, lck);
   __KMP_SET_REDUCTION_METHOD(global_tid, packed_reduction_method);
 
+  OMPT_REDUCTION_DECL(th, global_tid);
+
   if (packed_reduction_method == critical_reduce_block) {
 
+    OMPT_REDUCTION_BEGIN;
     __kmp_enter_critical_section_reduce_block(loc, global_tid, lck);
     retval = 1;
 
   } else if (packed_reduction_method == empty_reduce_block) {
 
+    OMPT_REDUCTION_BEGIN;
     // usage: if team size == 1, no synchronization is required ( Intel
     // platforms only )
     retval = 1;
@@ -3726,16 +3698,13 @@ kmp_int32 __kmpc_reduce(ident_t *loc, kmp_int32 global_tid, kmp_int32 num_vars,
     // should never reach this block
     KMP_ASSERT(0); // "unexpected method"
   }
-#if OMP_40_ENABLED
   if (teams_swapped) {
     __kmp_restore_swapped_teams(th, team, task_state);
   }
-#endif
 
   KA_TRACE(10,
            ("__kmpc_reduce() exit: called T#%d: method %08x, returns %08x\n",
             global_tid, packed_reduction_method, retval));
-
   return retval;
 }
 
@@ -3753,27 +3722,25 @@ void __kmpc_end_reduce(ident_t *loc, kmp_int32 global_tid,
                        kmp_critical_name *lck) {
 
   PACKED_REDUCTION_METHOD_T packed_reduction_method;
-#if OMP_40_ENABLED
   kmp_info_t *th;
   kmp_team_t *team;
   int teams_swapped = 0, task_state;
-#endif
 
   KA_TRACE(10, ("__kmpc_end_reduce() enter: called T#%d\n", global_tid));
 
-#if OMP_40_ENABLED
   th = __kmp_thread_from_gtid(global_tid);
   teams_swapped = __kmp_swap_teams_for_teams_reduction(th, &team, &task_state);
-#endif // OMP_40_ENABLED
 
   packed_reduction_method = __KMP_GET_REDUCTION_METHOD(global_tid);
 
   // this barrier should be visible to a customer and to the threading profile
   // tool (it's a terminating barrier on constructs if NOWAIT not specified)
+  OMPT_REDUCTION_DECL(th, global_tid);
 
   if (packed_reduction_method == critical_reduce_block) {
-
     __kmp_end_critical_section_reduce_block(loc, global_tid, lck);
+
+    OMPT_REDUCTION_END;
 
 // TODO: implicit barrier: should be exposed
 #if OMPT_SUPPORT
@@ -3796,6 +3763,8 @@ void __kmpc_end_reduce(ident_t *loc, kmp_int32 global_tid,
 #endif
 
   } else if (packed_reduction_method == empty_reduce_block) {
+
+    OMPT_REDUCTION_END;
 
 // usage: if team size==1, no synchronization is required (Intel platforms only)
 
@@ -3853,11 +3822,9 @@ void __kmpc_end_reduce(ident_t *loc, kmp_int32 global_tid,
     // should never reach this block
     KMP_ASSERT(0); // "unexpected method"
   }
-#if OMP_40_ENABLED
   if (teams_swapped) {
     __kmp_restore_swapped_teams(th, team, task_state);
   }
-#endif
 
   if (__kmp_env_consistency_check)
     __kmp_pop_sync(global_tid, ct_reduce, loc);
@@ -3903,7 +3870,6 @@ kmp_uint64 __kmpc_get_parent_taskid() {
 
 } // __kmpc_get_parent_taskid
 
-#if OMP_45_ENABLED
 /*!
 @ingroup WORK_SHARING
 @param loc  source location information.
@@ -4215,9 +4181,7 @@ void __kmpc_doacross_fini(ident_t *loc, int gtid) {
   pr_buf->th_doacross_info = NULL;
   KA_TRACE(20, ("__kmpc_doacross_fini() exit: T#%d\n", gtid));
 }
-#endif
 
-#if OMP_50_ENABLED
 /* omp_alloc/omp_free only defined for C/C++, not for Fortran */
 void *omp_alloc(size_t size, omp_allocator_handle_t allocator) {
   return __kmpc_alloc(__kmp_entry_gtid(), size, allocator);
@@ -4240,6 +4204,3 @@ int __kmpc_pause_resource(kmp_pause_status_t level) {
   }
   return __kmp_pause_resource(level);
 }
-#endif // OMP_50_ENABLED
-
-// end of file //

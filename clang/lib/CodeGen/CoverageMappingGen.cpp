@@ -1114,8 +1114,8 @@ struct CounterCoverageMappingBuilder
         // Make a region for the body of the switch.  If the body starts with
         // a case, that case will reuse this region; otherwise, this covers
         // the unreachable code at the beginning of the switch body.
-        size_t Index =
-            pushRegion(Counter::getZero(), getStart(CS->body_front()));
+        size_t Index = pushRegion(Counter::getZero(), getStart(CS));
+        getRegion().setGap(true);
         for (const auto *Child : CS->children())
           Visit(Child);
 
@@ -1281,7 +1281,7 @@ std::string getCoverageSection(const CodeGenModule &CGM) {
 std::string normalizeFilename(StringRef Filename) {
   llvm::SmallString<256> Path(Filename);
   llvm::sys::fs::make_absolute(Path);
-  llvm::sys::path::remove_dots(Path, /*remove_dot_dots=*/true);
+  llvm::sys::path::remove_dots(Path, /*remove_dot_dot=*/true);
   return Path.str().str();
 }
 
@@ -1442,7 +1442,7 @@ void CoverageMappingModuleGen::emit() {
       CovDataVal, llvm::getCoverageMappingVarName());
 
   CovData->setSection(getCoverageSection(CGM));
-  CovData->setAlignment(8);
+  CovData->setAlignment(llvm::Align(8));
 
   // Make sure the data doesn't get deleted.
   CGM.addUsedGlobal(CovData);

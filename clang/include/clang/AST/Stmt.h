@@ -604,6 +604,15 @@ protected:
     unsigned FPFeatures : 3;
   };
 
+  class CXXRewrittenBinaryOperatorBitfields {
+    friend class ASTStmtReader;
+    friend class CXXRewrittenBinaryOperator;
+
+    unsigned : NumCallExprBits;
+
+    unsigned IsReversed : 1;
+  };
+
   class CXXBoolLiteralExprBitfields {
     friend class CXXBoolLiteralExpr;
 
@@ -978,6 +987,7 @@ protected:
 
     // C++ Expressions
     CXXOperatorCallExprBitfields CXXOperatorCallExprBits;
+    CXXRewrittenBinaryOperatorBitfields CXXRewrittenBinaryOperatorBits;
     CXXBoolLiteralExprBitfields CXXBoolLiteralExprBits;
     CXXNullPtrLiteralExprBitfields CXXNullPtrLiteralExprBits;
     CXXThisExprBitfields CXXThisExprBits;
@@ -1349,11 +1359,6 @@ public:
     return !body_empty() ? body_begin()[size() - 1] : nullptr;
   }
 
-  void setLastStmt(Stmt *S) {
-    assert(!body_empty() && "setLastStmt");
-    body_begin()[size() - 1] = S;
-  }
-
   using const_body_iterator = Stmt *const *;
   using body_const_range = llvm::iterator_range<const_body_iterator>;
 
@@ -1394,6 +1399,26 @@ public:
 
   const_reverse_body_iterator body_rend() const {
     return const_reverse_body_iterator(body_begin());
+  }
+
+  // Get the Stmt that StmtExpr would consider to be the result of this
+  // compound statement. This is used by StmtExpr to properly emulate the GCC
+  // compound expression extension, which ignores trailing NullStmts when
+  // getting the result of the expression.
+  // i.e. ({ 5;;; })
+  //           ^^ ignored
+  // If we don't find something that isn't a NullStmt, just return the last
+  // Stmt.
+  Stmt *getStmtExprResult() {
+    for (auto *B : llvm::reverse(body())) {
+      if (!isa<NullStmt>(B))
+        return B;
+    }
+    return body_back();
+  }
+
+  const Stmt *getStmtExprResult() const {
+    return const_cast<CompoundStmt *>(this)->getStmtExprResult();
   }
 
   SourceLocation getBeginLoc() const { return CompoundStmtBits.LBraceLoc; }
@@ -1969,6 +1994,10 @@ public:
 
   bool isConstexpr() const { return IfStmtBits.IsConstexpr; }
   void setConstexpr(bool C) { IfStmtBits.IsConstexpr = C; }
+
+  /// If this is an 'if constexpr', determine which substatement will be taken.
+  /// Otherwise, or if the condition is value-dependent, returns None.
+  Optional<const Stmt*> getNondiscardedCase(const ASTContext &Ctx) const;
 
   bool isObjCAvailabilityCheck() const;
 

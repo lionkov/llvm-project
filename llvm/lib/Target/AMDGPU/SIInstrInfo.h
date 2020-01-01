@@ -173,7 +173,7 @@ public:
   }
 
   bool isReallyTriviallyReMaterializable(const MachineInstr &MI,
-                                         AliasAnalysis *AA) const override;
+                                         AAResults *AA) const override;
 
   bool areLoadsFromSameBasePtr(SDNode *Load1, SDNode *Load2,
                                int64_t &Offset1,
@@ -192,7 +192,7 @@ public:
                                int64_t Offset1, unsigned NumLoads) const override;
 
   void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
-                   const DebugLoc &DL, unsigned DestReg, unsigned SrcReg,
+                   const DebugLoc &DL, MCRegister DestReg, MCRegister SrcReg,
                    bool KillSrc) const override;
 
   unsigned calculateLDSSpillAddress(MachineBasicBlock &MBB, MachineInstr &MI,
@@ -229,6 +229,14 @@ public:
 
   bool expandPostRAPseudo(MachineInstr &MI) const override;
 
+  // Splits a V_MOV_B64_DPP_PSEUDO opcode into a pair of v_mov_b32_dpp
+  // instructions. Returns a pair of generated instructions.
+  // Can split either post-RA with physical registers or pre-RA with
+  // virtual registers. In latter case IR needs to be in SSA form and
+  // and a REG_SEQUENCE is produced to define original register.
+  std::pair<MachineInstr*, MachineInstr*>
+  expandMovDPP64(MachineInstr &MI) const;
+
   // Returns an opcode that can be used to move a value to a \p DstRC
   // register.  If there is no hardware instruction that can store to \p
   // DstRC, then AMDGPU::COPY is returned.
@@ -242,7 +250,7 @@ public:
     return commuteOpcode(MI.getOpcode());
   }
 
-  bool findCommutedOpIndices(MachineInstr &MI, unsigned &SrcOpIdx1,
+  bool findCommutedOpIndices(const MachineInstr &MI, unsigned &SrcOpIdx1,
                              unsigned &SrcOpIdx2) const override;
 
   bool findCommutedOpIndices(MCInstrDesc Desc, unsigned & SrcOpIdx0,
@@ -303,8 +311,7 @@ public:
 
   bool
   areMemAccessesTriviallyDisjoint(const MachineInstr &MIa,
-                                  const MachineInstr &MIb,
-                                  AliasAnalysis *AA = nullptr) const override;
+                                  const MachineInstr &MIb) const override;
 
   bool isFoldableCopy(const MachineInstr &MI) const;
 
@@ -570,6 +577,22 @@ public:
     return get(Opcode).TSFlags & SIInstrFlags::VINTRP;
   }
 
+  static bool isMAI(const MachineInstr &MI) {
+    return MI.getDesc().TSFlags & SIInstrFlags::IsMAI;
+  }
+
+  bool isMAI(uint16_t Opcode) const {
+    return get(Opcode).TSFlags & SIInstrFlags::IsMAI;
+  }
+
+  static bool isDOT(const MachineInstr &MI) {
+    return MI.getDesc().TSFlags & SIInstrFlags::IsDOT;
+  }
+
+  bool isDOT(uint16_t Opcode) const {
+    return get(Opcode).TSFlags & SIInstrFlags::IsDOT;
+  }
+
   static bool isScalarUnit(const MachineInstr &MI) {
     return MI.getDesc().TSFlags & (SIInstrFlags::SALU | SIInstrFlags::SMRD);
   }
@@ -650,6 +673,14 @@ public:
     const MachineFunction &MF = *MI.getParent()->getParent();
     const MachineRegisterInfo &MRI = MF.getRegInfo();
     return !RI.isSGPRReg(MRI, Dest);
+  }
+
+  bool hasVGPRUses(const MachineInstr &MI) const {
+    const MachineFunction &MF = *MI.getParent()->getParent();
+    const MachineRegisterInfo &MRI = MF.getRegInfo();
+    return llvm::any_of(MI.explicit_uses(),
+                        [&MRI, this](const MachineOperand &MO) {
+      return MO.isReg() && RI.isVGPR(MRI, MO.getReg());});
   }
 
   /// Whether we must prevent this instruction from executing with EXEC = 0.
@@ -938,6 +969,19 @@ public:
 
   bool isBasicBlockPrologue(const MachineInstr &MI) const override;
 
+  MachineInstr *createPHIDestinationCopy(MachineBasicBlock &MBB,
+                                         MachineBasicBlock::iterator InsPt,
+                                         const DebugLoc &DL, Register Src,
+                                         Register Dst) const override;
+
+  MachineInstr *createPHISourceCopy(MachineBasicBlock &MBB,
+                                    MachineBasicBlock::iterator InsPt,
+                                    const DebugLoc &DL, Register Src,
+                                    unsigned SrcSubReg,
+                                    Register Dst) const override;
+
+  bool isWave32() const;
+
   /// Return a partially built integer add instruction without carry.
   /// Caller must add source operands.
   /// For pre-GFX9 it will generate unused carry destination operand.
@@ -947,6 +991,12 @@ public:
                                     const DebugLoc &DL,
                                     unsigned DestReg) const;
 
+  MachineInstrBuilder getAddNoCarry(MachineBasicBlock &MBB,
+                                    MachineBasicBlock::iterator I,
+                                    const DebugLoc &DL,
+                                    Register DestReg,
+                                    RegScavenger &RS) const;
+
   static bool isKillTerminator(unsigned Opcode);
   const MCInstrDesc &getKillTerminatorFromPseudo(unsigned Opcode) const;
 
@@ -954,10 +1004,22 @@ public:
     return isUInt<12>(Imm);
   }
 
+  unsigned getNumFlatOffsetBits(unsigned AddrSpace, bool Signed) const;
+
+  /// Returns if \p Offset is legal for the subtarget as the offset to a FLAT
+  /// encoded instruction. If \p Signed, this is for an instruction that
+  /// interprets the offset as signed.
+  bool isLegalFLATOffset(int64_t Offset, unsigned AddrSpace,
+                         bool Signed) const;
+
   /// \brief Return a target-specific opcode if Opcode is a pseudo instruction.
   /// Return -1 if the target-specific opcode for the pseudo instruction does
   /// not exist. If Opcode is not a pseudo instruction, this is identity.
   int pseudoToMCOpcode(int Opcode) const;
+
+  /// \brief Check if this instruction should only be used by assembler.
+  /// Return true if this opcode should not be used by codegen.
+  bool isAsmOnlyOpcode(int MCOp) const;
 
   const TargetRegisterClass *getRegClass(const MCInstrDesc &TID, unsigned OpNum,
                                          const TargetRegisterInfo *TRI,
@@ -969,6 +1031,13 @@ public:
   }
 
   void fixImplicitOperands(MachineInstr &MI) const;
+
+  MachineInstr *foldMemoryOperandImpl(MachineFunction &MF, MachineInstr &MI,
+                                      ArrayRef<unsigned> Ops,
+                                      MachineBasicBlock::iterator InsertPt,
+                                      int FrameIndex,
+                                      LiveIntervals *LIS = nullptr,
+                                      VirtRegMap *VRM = nullptr) const override;
 };
 
 /// \brief Returns true if a reg:subreg pair P has a TRC class
@@ -1000,13 +1069,19 @@ MachineInstr *getVRegSubRegDef(const TargetInstrInfo::RegSubRegPair &P,
                                MachineRegisterInfo &MRI);
 
 /// \brief Return false if EXEC is not changed between the def of \p VReg at \p
-/// DefMI and uses. If \p UseMI is not specified, this checks all uses of \p
-/// VReg. Should be run on SSA. Currently does not attempt to track between
-/// blocks.
+/// DefMI and the use at \p UseMI. Should be run on SSA. Currently does not
+/// attempt to track between blocks.
 bool execMayBeModifiedBeforeUse(const MachineRegisterInfo &MRI,
-                                unsigned VReg,
+                                Register VReg,
                                 const MachineInstr &DefMI,
-                                const MachineInstr *UseMI = nullptr);
+                                const MachineInstr &UseMI);
+
+/// \brief Return false if EXEC is not changed between the def of \p VReg at \p
+/// DefMI and all its uses. Should be run on SSA. Currently does not attempt to
+/// track between blocks.
+bool execMayBeModifiedBeforeAnyUse(const MachineRegisterInfo &MRI,
+                                   Register VReg,
+                                   const MachineInstr &DefMI);
 
 namespace AMDGPU {
 

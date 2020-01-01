@@ -43,7 +43,9 @@ include(CMakeDependentOption)
 include(HandleCompilerRT)
 
 # Define options.
-option(LIBCXXABI_ENABLE_EXCEPTIONS "Use exceptions." ON)
+option(LIBCXXABI_ENABLE_EXCEPTIONS
+  "Provide support for exceptions in the runtime.
+  When disabled, libc++abi does not support stack unwinding and other exceptions-related features." ON)
 option(LIBCXXABI_ENABLE_ASSERTIONS "Enable assertions independent of build mode." ON)
 option(LIBCXXABI_ENABLE_PEDANTIC "Compile with pedantic enabled." ON)
 option(LIBCXXABI_ENABLE_PIC "Build Position-Independent Code, even in static library" ON)
@@ -75,6 +77,11 @@ set(LIBCXXABI_TARGET_TRIPLE "" CACHE STRING "Target triple for cross compiling."
 set(LIBCXXABI_GCC_TOOLCHAIN "" CACHE PATH "GCC toolchain for cross compiling.")
 set(LIBCXXABI_SYSROOT "" CACHE PATH "Sysroot for cross compiling.")
 set(LIBCXXABI_LIBCXX_LIBRARY_PATH "" CACHE PATH "The path to libc++ library.")
+set(LIBCXXABI_LIBRARY_VERSION "1.0" CACHE STRING
+"Version of libc++abi. This will be reflected in the name of the shared \
+library produced. For example, -DLIBCXXABI_LIBRARY_VERSION=x.y will \
+result in the library being named libc++abi.x.y.dylib, along with the \
+usual symlinks pointing to that.")
 
 # Default to building a shared library so that the default options still test
 # the libc++abi that is being built. There are two problems with testing a
@@ -263,6 +270,13 @@ include(config-ix)
 
 if (LIBCXXABI_HAS_NOSTDINCXX_FLAG)
   list(APPEND LIBCXXABI_COMPILE_FLAGS -nostdinc++)
+  # cmake 3.14 and above remove system include paths that are explicitly
+  # passed on the command line.  We build with -nostdinc++ and explicitly add
+  # just the libcxx system include paths with -I on the command line.
+  # Setting CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES effectively prevents cmake
+  # from removing these.
+  # See: https://gitlab.kitware.com/cmake/cmake/issues/19227
+  set(CMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES "")
   # Remove -stdlib flags to prevent them from causing an unused flag warning.
   string(REPLACE "-stdlib=libc++" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
   string(REPLACE "-stdlib=libstdc++" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
@@ -442,7 +456,9 @@ if (LIBCXXABI_BAREMETAL)
 endif()
 
 if (LIBCXXABI_HAS_COMMENT_LIB_PRAGMA)
-  add_definitions(-D_LIBCXXABI_HAS_COMMENT_LIB_PRAGMA)
+  if (LIBCXXABI_HAS_PTHREAD_LIB)
+    add_definitions(-D_LIBCXXABI_LINK_PTHREAD_LIB)
+  endif()
 endif()
 
 string(REPLACE ";" " " LIBCXXABI_CXX_FLAGS "${LIBCXXABI_CXX_FLAGS}")

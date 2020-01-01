@@ -75,6 +75,7 @@ class ObjCAtTryStmt;
 class ObjCAtThrowStmt;
 class ObjCAtSynchronizedStmt;
 class ObjCAutoreleasePoolStmt;
+class ReturnsNonNullAttr;
 
 namespace analyze_os_log {
 class OSLogBufferLayout;
@@ -114,7 +115,7 @@ enum TypeEvaluationKind {
   SANITIZER_CHECK(DivremOverflow, divrem_overflow, 0)                          \
   SANITIZER_CHECK(DynamicTypeCacheMiss, dynamic_type_cache_miss, 0)            \
   SANITIZER_CHECK(FloatCastOverflow, float_cast_overflow, 0)                   \
-  SANITIZER_CHECK(FunctionTypeMismatch, function_type_mismatch, 0)             \
+  SANITIZER_CHECK(FunctionTypeMismatch, function_type_mismatch, 1)             \
   SANITIZER_CHECK(ImplicitConversion, implicit_conversion, 0)                  \
   SANITIZER_CHECK(InvalidBuiltin, invalid_builtin, 0)                          \
   SANITIZER_CHECK(LoadInvalidValue, load_invalid_value, 0)                     \
@@ -480,6 +481,10 @@ public:
   /// finally block or filter expression.
   bool IsOutlinedSEHHelper = false;
 
+  /// True if CodeGen currently emits code inside presereved access index
+  /// region.
+  bool IsInPreservedAIRegion = false;
+
   const CodeGen::CGBlockInfo *BlockInfo = nullptr;
   llvm::Value *BlockPointer = nullptr;
 
@@ -671,7 +676,8 @@ public:
   /// PushDestructorCleanup - Push a cleanup to call the
   /// complete-object variant of the given destructor on the object at
   /// the given address.
-  void PushDestructorCleanup(const CXXDestructorDecl *Dtor, Address Addr);
+  void PushDestructorCleanup(const CXXDestructorDecl *Dtor, QualType T,
+                             Address Addr);
 
   /// PopCleanupBlock - Will pop the cleanup entry on the stack and
   /// process all branch fixups.
@@ -942,6 +948,19 @@ public:
     }
   };
 
+  /// Save/restore original map of previously emitted local vars in case when we
+  /// need to duplicate emission of the same code several times in the same
+  /// function for OpenMP code.
+  class OMPLocalDeclMapRAII {
+    CodeGenFunction &CGF;
+    DeclMapTy SavedMap;
+
+  public:
+    OMPLocalDeclMapRAII(CodeGenFunction &CGF)
+        : CGF(CGF), SavedMap(CGF.LocalDeclMap) {}
+    ~OMPLocalDeclMapRAII() { SavedMap.swap(CGF.LocalDeclMap); }
+  };
+
   /// Takes the old cleanup stack size and emits the cleanup blocks
   /// that have been added.
   void
@@ -1029,7 +1048,7 @@ public:
     assert(isInConditionalBranch());
     llvm::BasicBlock *block = OutermostConditional->getStartingBlock();
     auto store = new llvm::StoreInst(value, addr.getPointer(), &block->back());
-    store->setAlignment(addr.getAlignment().getQuantity());
+    store->setAlignment(addr.getAlignment().getAsAlign());
   }
 
   /// An RAII object to record that we're evaluating a statement
@@ -1257,7 +1276,7 @@ private:
       CancelExit(OpenMPDirectiveKind Kind, JumpDest ExitBlock,
                  JumpDest ContBlock)
           : Kind(Kind), ExitBlock(ExitBlock), ContBlock(ContBlock) {}
-      OpenMPDirectiveKind Kind = OMPD_unknown;
+      OpenMPDirectiveKind Kind = llvm::omp::OMPD_unknown;
       /// true if the exit block has been emitted already by the special
       /// emitExit() call, false if the default codegen is used.
       bool HasBeenEmitted = false;
@@ -1579,11 +1598,7 @@ private:
   Address ReturnLocation = Address::invalid();
 
   /// Check if the return value of this function requires sanitization.
-  bool requiresReturnValueCheck() const {
-    return requiresReturnValueNullabilityCheck() ||
-           (SanOpts.has(SanitizerKind::ReturnsNonnullAttribute) &&
-            CurCodeDecl && CurCodeDecl->getAttr<ReturnsNonNullAttr>());
-  }
+  bool requiresReturnValueCheck() const;
 
   llvm::BasicBlock *TerminateLandingPad = nullptr;
   llvm::BasicBlock *TerminateHandler = nullptr;
@@ -2550,8 +2565,8 @@ public:
   static Destroyer destroyCXXObject;
 
   void EmitCXXDestructorCall(const CXXDestructorDecl *D, CXXDtorType Type,
-                             bool ForVirtualBase, bool Delegating,
-                             Address This);
+                             bool ForVirtualBase, bool Delegating, Address This,
+                             QualType ThisTy);
 
   void EmitNewArrayInitializer(const CXXNewExpr *E, QualType elementType,
                                llvm::Type *ElementTy, Address NewPtr,
@@ -2647,6 +2662,9 @@ public:
 
   /// Converts Location to a DebugLoc, if debug information is enabled.
   llvm::DebugLoc SourceLocToDebugLoc(SourceLocation Location);
+
+  /// Get the record field index as represented in debug info.
+  unsigned getDebugInfoFIndex(const RecordDecl *Rec, unsigned FieldIndex);
 
 
   //===--------------------------------------------------------------------===//
@@ -2821,13 +2839,8 @@ public:
                                llvm::Value *Alignment,
                                llvm::Value *OffsetValue = nullptr);
 
-  void EmitAlignmentAssumption(llvm::Value *PtrValue, QualType Ty,
-                               SourceLocation Loc, SourceLocation AssumptionLoc,
-                               unsigned Alignment,
-                               llvm::Value *OffsetValue = nullptr);
-
   void EmitAlignmentAssumption(llvm::Value *PtrValue, const Expr *E,
-                               SourceLocation AssumptionLoc, unsigned Alignment,
+                               SourceLocation AssumptionLoc, llvm::Value *Alignment,
                                llvm::Value *OffsetValue = nullptr);
 
   //===--------------------------------------------------------------------===//
@@ -3129,6 +3142,7 @@ public:
   void EmitOMPParallelForDirective(const OMPParallelForDirective &S);
   void EmitOMPParallelForSimdDirective(const OMPParallelForSimdDirective &S);
   void EmitOMPParallelSectionsDirective(const OMPParallelSectionsDirective &S);
+  void EmitOMPParallelMasterDirective(const OMPParallelMasterDirective &S);
   void EmitOMPTaskDirective(const OMPTaskDirective &S);
   void EmitOMPTaskyieldDirective(const OMPTaskyieldDirective &S);
   void EmitOMPBarrierDirective(const OMPBarrierDirective &S);
@@ -3152,6 +3166,13 @@ public:
   void EmitOMPTaskLoopBasedDirective(const OMPLoopDirective &S);
   void EmitOMPTaskLoopDirective(const OMPTaskLoopDirective &S);
   void EmitOMPTaskLoopSimdDirective(const OMPTaskLoopSimdDirective &S);
+  void EmitOMPMasterTaskLoopDirective(const OMPMasterTaskLoopDirective &S);
+  void
+  EmitOMPMasterTaskLoopSimdDirective(const OMPMasterTaskLoopSimdDirective &S);
+  void EmitOMPParallelMasterTaskLoopDirective(
+      const OMPParallelMasterTaskLoopDirective &S);
+  void EmitOMPParallelMasterTaskLoopSimdDirective(
+      const OMPParallelMasterTaskLoopSimdDirective &S);
   void EmitOMPDistributeDirective(const OMPDistributeDirective &S);
   void EmitOMPDistributeParallelForDirective(
       const OMPDistributeParallelForDirective &S);
@@ -3670,9 +3691,9 @@ public:
                               llvm::Value *ImplicitParam,
                               QualType ImplicitParamTy, const CallExpr *E,
                               CallArgList *RtlArgs);
-  RValue EmitCXXDestructorCall(GlobalDecl Dtor,
-                               const CGCallee &Callee,
-                               llvm::Value *This, llvm::Value *ImplicitParam,
+  RValue EmitCXXDestructorCall(GlobalDecl Dtor, const CGCallee &Callee,
+                               llvm::Value *This, QualType ThisTy,
+                               llvm::Value *ImplicitParam,
                                QualType ImplicitParamTy, const CallExpr *E);
   RValue EmitCXXMemberCallExpr(const CXXMemberCallExpr *E,
                                ReturnValueSlot ReturnValue);
@@ -3718,14 +3739,19 @@ public:
 
   /// EmitTargetBuiltinExpr - Emit the given builtin call. Returns 0 if the call
   /// is unhandled by the current target.
-  llvm::Value *EmitTargetBuiltinExpr(unsigned BuiltinID, const CallExpr *E);
+  llvm::Value *EmitTargetBuiltinExpr(unsigned BuiltinID, const CallExpr *E,
+                                     ReturnValueSlot ReturnValue);
 
   llvm::Value *EmitAArch64CompareBuiltinExpr(llvm::Value *Op, llvm::Type *Ty,
                                              const llvm::CmpInst::Predicate Fp,
                                              const llvm::CmpInst::Predicate Ip,
                                              const llvm::Twine &Name = "");
   llvm::Value *EmitARMBuiltinExpr(unsigned BuiltinID, const CallExpr *E,
+                                  ReturnValueSlot ReturnValue,
                                   llvm::Triple::ArchType Arch);
+  llvm::Value *EmitARMMVEBuiltinExpr(unsigned BuiltinID, const CallExpr *E,
+                                     ReturnValueSlot ReturnValue,
+                                     llvm::Triple::ArchType Arch);
 
   llvm::Value *EmitCommonNeonBuiltinExpr(unsigned BuiltinID,
                                          unsigned LLVMIntrinsic,
@@ -3752,6 +3778,7 @@ public:
   llvm::Value *vectorWrapScalar16(llvm::Value *Op);
   llvm::Value *EmitAArch64BuiltinExpr(unsigned BuiltinID, const CallExpr *E,
                                       llvm::Triple::ArchType Arch);
+  llvm::Value *EmitBPFBuiltinExpr(unsigned BuiltinID, const CallExpr *E);
 
   llvm::Value *BuildVector(ArrayRef<llvm::Value*> Ops);
   llvm::Value *EmitX86BuiltinExpr(unsigned BuiltinID, const CallExpr *E);
@@ -4140,6 +4167,9 @@ public:
   /// point operation, expressed as the maximum relative error in ulp.
   void SetFPAccuracy(llvm::Value *Val, float Accuracy);
 
+  /// SetFPModel - Control floating point behavior via fp-model settings.
+  void SetFPModel();
+
 private:
   llvm::MDNode *getRangeForLoadFromType(QualType Ty);
   void EmitReturnOfRValue(RValue RV, QualType Ty);
@@ -4194,6 +4224,9 @@ private:
                                      llvm::IntegerType *ResType,
                                      llvm::Value *EmittedE,
                                      bool IsDynamic);
+
+  void emitZeroOrPatternForAutoVarInit(QualType type, const VarDecl &D,
+                                       Address Loc);
 
 public:
 #ifndef NDEBUG

@@ -255,6 +255,8 @@ StringRef llvm::object::getELFSectionTypeName(uint32_t Machine, unsigned Type) {
     STRINGIFY_ENUM_CASE(ELF, SHT_LLVM_ADDRSIG);
     STRINGIFY_ENUM_CASE(ELF, SHT_LLVM_DEPENDENT_LIBRARIES);
     STRINGIFY_ENUM_CASE(ELF, SHT_LLVM_SYMPART);
+    STRINGIFY_ENUM_CASE(ELF, SHT_LLVM_PART_EHDR);
+    STRINGIFY_ENUM_CASE(ELF, SHT_LLVM_PART_PHDR);
     STRINGIFY_ENUM_CASE(ELF, SHT_GNU_ATTRIBUTES);
     STRINGIFY_ENUM_CASE(ELF, SHT_GNU_HASH);
     STRINGIFY_ENUM_CASE(ELF, SHT_GNU_verdef);
@@ -475,7 +477,7 @@ std::string ELFFile<ELFT>::getDynamicTagAsString(unsigned Arch,
 #define PPC64_DYNAMIC_TAG(name, value)
 // Also ignore marker tags such as DT_HIOS (maps to DT_VERNEEDNUM), etc.
 #define DYNAMIC_TAG_MARKER(name, value)
-#define DYNAMIC_TAG(name, value) DYNAMIC_STRINGIFY_ENUM(name, value)
+#define DYNAMIC_TAG(name, value) case value: return #name;
 #include "llvm/BinaryFormat/DynamicTags.def"
 #undef DYNAMIC_TAG
 #undef AARCH64_DYNAMIC_TAG
@@ -537,12 +539,15 @@ Expected<typename ELFT::DynRange> ELFFile<ELFT>::dynamicEntries() const {
   }
 
   if (Dyn.empty())
+    // TODO: this error is untested.
     return createError("invalid empty dynamic section");
 
   if (DynSecSize % sizeof(Elf_Dyn) != 0)
+    // TODO: this error is untested.
     return createError("malformed dynamic section");
 
   if (Dyn.back().d_tag != ELF::DT_NULL)
+    // TODO: this error is untested.
     return createError("dynamic sections must be DT_NULL terminated");
 
   return Dyn;
@@ -567,12 +572,14 @@ Expected<const uint8_t *> ELFFile<ELFT>::toMappedAddr(uint64_t VAddr) const {
                        });
 
   if (I == LoadSegments.begin())
-    return createError("Virtual address is not in any segment");
+    return createError("virtual address is not in any segment: 0x" +
+                       Twine::utohexstr(VAddr));
   --I;
   const Elf_Phdr &Phdr = **I;
   uint64_t Delta = VAddr - Phdr.p_vaddr;
   if (Delta >= Phdr.p_filesz)
-    return createError("Virtual address is not in any segment");
+    return createError("virtual address is not in any segment: 0x" +
+                       Twine::utohexstr(VAddr));
   return base() + Phdr.p_offset + Delta;
 }
 

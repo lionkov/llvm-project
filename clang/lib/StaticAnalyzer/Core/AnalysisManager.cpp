@@ -13,7 +13,7 @@ using namespace ento;
 
 void AnalysisManager::anchor() { }
 
-AnalysisManager::AnalysisManager(ASTContext &ASTCtx, DiagnosticsEngine &diags,
+AnalysisManager::AnalysisManager(ASTContext &ASTCtx,
                                  const PathDiagnosticConsumers &PDC,
                                  StoreManagerCreator storemgr,
                                  ConstraintManagerCreator constraintmgr,
@@ -23,7 +23,7 @@ AnalysisManager::AnalysisManager(ASTContext &ASTCtx, DiagnosticsEngine &diags,
     : AnaCtxMgr(
           ASTCtx, Options.UnoptimizedCFG,
           Options.ShouldIncludeImplicitDtorsInCFG,
-          /*AddInitializers=*/true,
+          /*addInitializers=*/true,
           Options.ShouldIncludeTemporaryDtorsInCFG,
           Options.ShouldIncludeLifetimeInCFG,
           // Adding LoopExit elements to the CFG is a requirement for loop
@@ -38,11 +38,14 @@ AnalysisManager::AnalysisManager(ASTContext &ASTCtx, DiagnosticsEngine &diags,
           Options.ShouldElideConstructors,
           /*addVirtualBaseBranches=*/true,
           injector),
-      Ctx(ASTCtx), Diags(diags), LangOpts(ASTCtx.getLangOpts()),
+      Ctx(ASTCtx), LangOpts(ASTCtx.getLangOpts()),
       PathConsumers(PDC), CreateStoreMgr(storemgr),
       CreateConstraintMgr(constraintmgr), CheckerMgr(checkerMgr),
       options(Options) {
   AnaCtxMgr.getCFGBuildOptions().setAllAlwaysAdd();
+  AnaCtxMgr.getCFGBuildOptions().OmitImplicitValueInitializers = true;
+  AnaCtxMgr.getCFGBuildOptions().AddCXXDefaultInitExprInAggregates =
+      Options.ShouldIncludeDefaultInitForAggregates;
 }
 
 AnalysisManager::~AnalysisManager() {

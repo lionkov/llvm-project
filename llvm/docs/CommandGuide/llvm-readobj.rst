@@ -17,6 +17,30 @@ about one or more object files.
 If ``input`` is "``-``" or omitted, :program:`llvm-readobj` reads from standard
 input. Otherwise, it will read from the specified ``filenames``.
 
+DIFFERENCES TO LLVM-READELF
+---------------------------
+
+:program:`llvm-readelf` is an alias for the :manpage:`llvm-readobj` tool with a
+slightly different command-line interface and output that is GNU compatible.
+Following is a list of differences between :program:`llvm-readelf` and
+:program:`llvm-readobj`:
+
+- :program:`llvm-readelf` uses `GNU` for the :option:`--elf-output-style` option
+  by default. :program:`llvm-readobj` uses `LLVM`.
+- :program:`llvm-readelf` allows single-letter grouped flags (e.g.
+  ``llvm-readelf -SW`` is the same as  ``llvm-readelf -S -W``).
+  :program:`llvm-readobj` does not allow grouping.
+- :program:`llvm-readelf` provides :option:`-s` as an alias for
+  :option:`--symbols`, for GNU :program:`readelf` compatibility, whereas it is
+  an alias for :option:`--section-headers` in :program:`llvm-readobj`.
+- :program:`llvm-readobj` provides ``-t`` as an alias for :option:`--symbols`.
+  :program:`llvm-readelf` does not.
+- :program:`llvm-readobj` provides ``--sr``, ``--sd``, ``--st`` and ``--dt`` as
+  aliases for :option:`--section-relocations`, :option:`--section-data`,
+  :option:`--section-symbols` and :option:`--dyn-symbols` respectively.
+  :program:`llvm-readelf` does not provide these aliases, to avoid conflicting
+  with grouped flags.
+
 GENERAL AND MULTI-FORMAT OPTIONS
 --------------------------------
 
@@ -77,15 +101,18 @@ file formats.
 
 .. option:: --section-data, --sd
 
- When used with :option:`--sections`, display section data for each section shown.
+ When used with :option:`--sections`, display section data for each section
+ shown. This option has no effect for GNU style output.
 
 .. option:: --section-relocations, --sr
 
- When used with :option:`--sections`, display relocations for each section shown.
+ When used with :option:`--sections`, display relocations for each section
+ shown. This option has no effect for GNU style output.
 
 .. option:: --section-symbols, --st
 
  When used with :option:`--sections`, display symbols for each section shown.
+ This option has no effect for GNU style output.
 
 .. option:: --stackmap
 
@@ -106,7 +133,7 @@ file formats.
 
 .. option:: --version
 
- Display the version of this program.
+ Display the version of the :program:`llvm-readobj` executable.
 
 .. option:: @<FILE>
 
@@ -117,13 +144,17 @@ ELF SPECIFIC OPTIONS
 
 The following options are implemented only for the ELF file format.
 
-.. option:: --arm-attributes
+.. option:: --arch-specific, -A
 
- Display the ARM attributes section. Only applicable for ARM architectures.
+ Display architecture-specific information, e.g. the ARM attributes section on ARM.
 
 .. option:: --demangle, -C
 
  Display demangled symbol names in the output.
+
+.. option:: --dependent-libraries
+
+ Display the dependent libraries section.
 
 .. option:: --dyn-relocations
 
@@ -151,7 +182,7 @@ The following options are implemented only for the ELF file format.
 
 .. option:: --elf-output-style=<value>
 
- Specify the style to dump ELF information in. Valid options are ``LLVM`` and
+ Format ELF information in the specified style. Valid options are ``LLVM`` and
  ``GNU``. ``LLVM`` output (the default) is an expanded and structured format,
  whilst ``GNU`` output mimics the equivalent GNU :program:`readelf` output.
 
@@ -165,7 +196,7 @@ The following options are implemented only for the ELF file format.
 
 .. option:: --hash-symbols
 
- Display the dynamic symbols derived from the hash table.
+ Display the expanded hash table with dynamic symbol data.
 
 .. option:: --hash-table
 
@@ -186,6 +217,12 @@ The following options are implemented only for the ELF file format.
 .. option:: --section-mapping
 
  Display the section to segment mapping.
+
+.. option:: --stack-sizes
+
+ Display the contents of the stack sizes section(s), i.e. pairs of function
+ names and the size of their stack frames. Currently only implemented for GNU
+ style output.
 
 .. option:: --version-info, -V
 

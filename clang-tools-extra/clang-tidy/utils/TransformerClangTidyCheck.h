@@ -10,8 +10,10 @@
 #define LLVM_CLANG_TOOLS_EXTRA_CLANG_TIDY_TRANSFORMER_CLANG_TIDY_CHECK_H
 
 #include "../ClangTidy.h"
+#include "../utils/IncludeInserter.h"
 #include "clang/ASTMatchers/ASTMatchFinder.h"
-#include "clang/Tooling/Refactoring/Transformer.h"
+#include "clang/Frontend/CompilerInstance.h"
+#include "clang/Tooling/Transformer/Transformer.h"
 #include <deque>
 #include <vector>
 
@@ -42,21 +44,24 @@ public:
   // no explanation is desired, indicate that explicitly (for example, by
   // passing `text("no explanation")` to `makeRule` as the `Explanation`
   // argument).
-  TransformerClangTidyCheck(std::function<Optional<tooling::RewriteRule>(
+  TransformerClangTidyCheck(std::function<Optional<transformer::RewriteRule>(
                                 const LangOptions &, const OptionsView &)>
                                 MakeRule,
                             StringRef Name, ClangTidyContext *Context);
 
   // Convenience overload of the constructor when the rule doesn't depend on any
   // of the language or clang-tidy options.
-  TransformerClangTidyCheck(tooling::RewriteRule R, StringRef Name,
+  TransformerClangTidyCheck(transformer::RewriteRule R, StringRef Name,
                             ClangTidyContext *Context);
 
+  void registerPPCallbacks(const SourceManager &SM, Preprocessor *PP,
+                           Preprocessor *ModuleExpanderPP) override;
   void registerMatchers(ast_matchers::MatchFinder *Finder) final;
   void check(const ast_matchers::MatchFinder::MatchResult &Result) final;
 
 private:
-  Optional<tooling::RewriteRule> Rule;
+  Optional<transformer::RewriteRule> Rule;
+  std::unique_ptr<clang::tidy::utils::IncludeInserter> Inserter;
 };
 
 } // namespace utils

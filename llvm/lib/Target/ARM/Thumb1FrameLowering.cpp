@@ -164,7 +164,7 @@ void Thumb1FrameLowering::emitPrologue(MachineFunction &MF,
   // to determine the end of the prologue.
   DebugLoc dl;
 
-  unsigned FramePtr = RegInfo->getFrameRegister(MF);
+  Register FramePtr = RegInfo->getFrameRegister(MF);
   unsigned BasePtr = RegInfo->getBaseRegister();
   int CFAOffset = 0;
 
@@ -459,8 +459,8 @@ static bool isCSRestore(MachineInstr &MI, const MCPhysReg *CSRegs) {
   else if (MI.getOpcode() == ARM::tPOP) {
     return true;
   } else if (MI.getOpcode() == ARM::tMOVr) {
-    unsigned Dst = MI.getOperand(0).getReg();
-    unsigned Src = MI.getOperand(1).getReg();
+    Register Dst = MI.getOperand(0).getReg();
+    Register Src = MI.getOperand(1).getReg();
     return ((ARM::tGPRRegClass.contains(Src) || Src == ARM::LR) &&
             ARM::hGPRRegClass.contains(Dst));
   }
@@ -483,7 +483,7 @@ void Thumb1FrameLowering::emitEpilogue(MachineFunction &MF,
   assert((unsigned)NumBytes >= ArgRegsSaveSize &&
          "ArgRegsSaveSize is included in NumBytes");
   const MCPhysReg *CSRegs = RegInfo->getCalleeSavedRegs(&MF);
-  unsigned FramePtr = RegInfo->getFrameRegister(MF);
+  Register FramePtr = RegInfo->getFrameRegister(MF);
 
   if (!AFI->hasStackFrame()) {
     if (NumBytes - ArgRegsSaveSize != 0)
@@ -889,8 +889,9 @@ spillCalleeSavedRegisters(MachineBasicBlock &MBB,
         findNextOrderedReg(std::begin(AllCopyRegs), CopyRegs, AllCopyRegsEnd);
 
     // Create the PUSH, but don't insert it yet (the MOVs need to come first).
-    MachineInstrBuilder PushMIB =
-        BuildMI(MF, DL, TII.get(ARM::tPUSH)).add(predOps(ARMCC::AL));
+    MachineInstrBuilder PushMIB = BuildMI(MF, DL, TII.get(ARM::tPUSH))
+                                      .add(predOps(ARMCC::AL))
+                                      .setMIFlags(MachineInstr::FrameSetup);
 
     SmallVector<unsigned, 4> RegsToPush;
     while (HiRegToSave != AllHighRegsEnd && CopyReg != AllCopyRegsEnd) {
@@ -903,7 +904,8 @@ spillCalleeSavedRegisters(MachineBasicBlock &MBB,
         BuildMI(MBB, MI, DL, TII.get(ARM::tMOVr))
             .addReg(*CopyReg, RegState::Define)
             .addReg(*HiRegToSave, getKillRegState(isKill))
-            .add(predOps(ARMCC::AL));
+            .add(predOps(ARMCC::AL))
+            .setMIFlags(MachineInstr::FrameSetup);
 
         // Record the register that must be added to the PUSH.
         RegsToPush.push_back(*CopyReg);

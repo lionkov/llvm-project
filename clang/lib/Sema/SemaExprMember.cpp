@@ -629,7 +629,7 @@ public:
   }
 
   std::unique_ptr<CorrectionCandidateCallback> clone() override {
-    return llvm::make_unique<RecordMemberExprValidatorCCC>(*this);
+    return std::make_unique<RecordMemberExprValidatorCCC>(*this);
   }
 
 private:
@@ -919,6 +919,18 @@ MemberExpr *Sema::BuildMemberExpr(
                          VK, OK, getNonOdrUseReasonInCurrentContext(Member));
   E->setHadMultipleCandidates(HadMultipleCandidates);
   MarkMemberReferenced(E);
+
+  // C++ [except.spec]p17:
+  //   An exception-specification is considered to be needed when:
+  //   - in an expression the function is the unique lookup result or the
+  //     selected member of a set of overloaded functions
+  if (auto *FPT = Ty->getAs<FunctionProtoType>()) {
+    if (isUnresolvedExceptionSpec(FPT->getExceptionSpecType())) {
+      if (auto *NewFPT = ResolveExceptionSpec(MemberNameInfo.getLoc(), FPT))
+        E->setType(Context.getQualifiedType(NewFPT, Ty.getQualifiers()));
+    }
+  }
+
   return E;
 }
 
@@ -934,19 +946,19 @@ static bool IsInFnTryBlockHandler(const Scope *S) {
   return false;
 }
 
-static VarDecl *
-getVarTemplateSpecialization(Sema &S, VarTemplateDecl *VarTempl,
+VarDecl *
+Sema::getVarTemplateSpecialization(VarTemplateDecl *VarTempl,
                       const TemplateArgumentListInfo *TemplateArgs,
                       const DeclarationNameInfo &MemberNameInfo,
                       SourceLocation TemplateKWLoc) {
   if (!TemplateArgs) {
-    S.diagnoseMissingTemplateArguments(TemplateName(VarTempl),
-                                       MemberNameInfo.getBeginLoc());
+    diagnoseMissingTemplateArguments(TemplateName(VarTempl),
+                                     MemberNameInfo.getBeginLoc());
     return nullptr;
   }
 
-  DeclResult VDecl = S.CheckVarTemplateId(
-      VarTempl, TemplateKWLoc, MemberNameInfo.getLoc(), *TemplateArgs);
+  DeclResult VDecl = CheckVarTemplateId(VarTempl, TemplateKWLoc,
+                                        MemberNameInfo.getLoc(), *TemplateArgs);
   if (VDecl.isInvalid())
     return nullptr;
   VarDecl *Var = cast<VarDecl>(VDecl.get());
@@ -1006,7 +1018,7 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
     // Rederive where we looked up.
     DeclContext *DC = (SS.isSet()
                        ? computeDeclContext(SS, false)
-                       : BaseType->getAs<RecordType>()->getDecl());
+                       : BaseType->castAs<RecordType>()->getDecl());
 
     if (ExtraArgs) {
       ExprResult RetryExpr;
@@ -1095,7 +1107,7 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
              "How did we get template arguments here sans a variable template");
       if (isa<VarTemplateDecl>(MemberDecl)) {
         MemberDecl = getVarTemplateSpecialization(
-            *this, cast<VarTemplateDecl>(MemberDecl), TemplateArgs,
+            cast<VarTemplateDecl>(MemberDecl), TemplateArgs,
             R.getLookupNameInfo(), TemplateKWLoc);
         if (!MemberDecl)
           return ExprError();
@@ -1106,7 +1118,7 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
     SourceLocation Loc = R.getNameLoc();
     if (SS.getRange().isValid())
       Loc = SS.getRange().getBegin();
-    BaseExpr = BuildCXXThisExpr(Loc, BaseExprType, /*isImplicit=*/true);
+    BaseExpr = BuildCXXThisExpr(Loc, BaseExprType, /*IsImplicit=*/true);
   }
 
   // Check the use of this member.
@@ -1130,7 +1142,7 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
 
   if (VarDecl *Var = dyn_cast<VarDecl>(MemberDecl)) {
     return BuildMemberExpr(BaseExpr, IsArrow, OpLoc, &SS, TemplateKWLoc, Var,
-                           FoundDecl, /*MultipleCandidates=*/false,
+                           FoundDecl, /*HadMultipleCandidates=*/false,
                            MemberNameInfo, Var->getType().getNonReferenceType(),
                            VK_LValue, OK_Ordinary);
   }
@@ -1147,23 +1159,23 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
     }
 
     return BuildMemberExpr(BaseExpr, IsArrow, OpLoc, &SS, TemplateKWLoc,
-                           MemberFn, FoundDecl, /*MultipleCandidates=*/false,
+                           MemberFn, FoundDecl, /*HadMultipleCandidates=*/false,
                            MemberNameInfo, type, valueKind, OK_Ordinary);
   }
   assert(!isa<FunctionDecl>(MemberDecl) && "member function not C++ method?");
 
   if (EnumConstantDecl *Enum = dyn_cast<EnumConstantDecl>(MemberDecl)) {
     return BuildMemberExpr(BaseExpr, IsArrow, OpLoc, &SS, TemplateKWLoc, Enum,
-                           FoundDecl, /*MultipleCandidates=*/false,
+                           FoundDecl, /*HadMultipleCandidates=*/false,
                            MemberNameInfo, Enum->getType(), VK_RValue,
                            OK_Ordinary);
   }
   if (VarTemplateDecl *VarTempl = dyn_cast<VarTemplateDecl>(MemberDecl)) {
     if (VarDecl *Var = getVarTemplateSpecialization(
-            *this, VarTempl, TemplateArgs, MemberNameInfo, TemplateKWLoc))
+            VarTempl, TemplateArgs, MemberNameInfo, TemplateKWLoc))
       return BuildMemberExpr(
           BaseExpr, IsArrow, OpLoc, &SS, TemplateKWLoc, Var, FoundDecl,
-          /*MultipleCandidates=*/false, MemberNameInfo,
+          /*HadMultipleCandidates=*/false, MemberNameInfo,
           Var->getType().getNonReferenceType(), VK_LValue, OK_Ordinary);
     return ExprError();
   }
@@ -1822,7 +1834,7 @@ Sema::BuildFieldReferenceExpr(Expr *BaseExpr, bool IsArrow,
 
   return BuildMemberExpr(Base.get(), IsArrow, OpLoc, &SS,
                          /*TemplateKWLoc=*/SourceLocation(), Field, FoundDecl,
-                         /*MultipleCandidates=*/false, MemberNameInfo,
+                         /*HadMultipleCandidates=*/false, MemberNameInfo,
                          MemberType, VK, OK);
 }
 
@@ -1851,7 +1863,7 @@ Sema::BuildImplicitMemberExpr(const CXXScopeSpec &SS,
     SourceLocation Loc = R.getNameLoc();
     if (SS.getRange().isValid())
       Loc = SS.getRange().getBegin();
-    baseExpr = BuildCXXThisExpr(loc, ThisTy, /*isImplicit=*/true);
+    baseExpr = BuildCXXThisExpr(loc, ThisTy, /*IsImplicit=*/true);
   }
 
   return BuildMemberReferenceExpr(baseExpr, ThisTy,

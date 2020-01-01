@@ -14,6 +14,7 @@ class LetDummies {
   bit isReMaterializable;
   bit isAsCheapAsAMove;
   bit VOPAsmPrefer32Bit;
+  bit FPDPRounding;
   Predicate SubtargetPredicate;
   string Constraints;
   string DisableEncoding;
@@ -41,9 +42,7 @@ class VOP_Pseudo <string opName, string suffix, VOPProfile P, dag outs, dag ins,
                   string asm, list<dag> pattern> :
   InstSI <outs, ins, asm, pattern>,
   VOP <opName>,
-  SIMCInstr <opName#suffix, SIEncodingFamily.NONE>,
-  MnemonicAlias<opName#suffix, opName> {
-
+  SIMCInstr <opName#suffix, SIEncodingFamily.NONE> {
   let isPseudo = 1;
   let isCodeGenOnly = 1;
   let UseNamedOperandTable = 1;
@@ -90,6 +89,7 @@ class VOP3_Pseudo <string opName, VOPProfile P, list<dag> pattern = [],
 
   let VOP3_OPSEL = isVop3OpSel;
   let IsPacked = P.IsPacked;
+  let IsMAI = P.IsMAI;
 
   let AsmOperands = !if(isVop3OpSel,
                         P.AsmVOP3OpSel,
@@ -147,6 +147,7 @@ class VOP3_Real <VOP_Pseudo ps, int EncodingFamily> :
 
   // copy relevant pseudo op flags
   let SubtargetPredicate = ps.SubtargetPredicate;
+  let OtherPredicates    = ps.OtherPredicates;
   let AsmMatchConverter  = ps.AsmMatchConverter;
   let AsmVariantName     = ps.AsmVariantName;
   let Constraints        = ps.Constraints;
@@ -326,6 +327,36 @@ class VOP3Pe <bits<10> op, VOPProfile P> : Enc64 {
   let Inst{63}    = !if(P.HasSrc2Mods, src2_modifiers{0}, 0); // neg (lo)
 }
 
+class VOP3Pe_MAI <bits<10> op, VOPProfile P> : Enc64 {
+  bits<8> vdst;
+  bits<10> src0;
+  bits<10> src1;
+  bits<9> src2;
+  bits<3> blgp;
+  bits<3> cbsz;
+  bits<4> abid;
+  bits<1> clamp;
+
+  let Inst{7-0} = vdst;
+
+  let Inst{10-8}  = !if(P.HasSrc1, cbsz, 0);
+  let Inst{14-11} = !if(P.HasSrc1, abid, 0);
+
+  let Inst{15} = !if(P.HasClamp, clamp{0}, 0);
+
+  let Inst{25-16} = op;
+  let Inst{31-26} = 0x34; //encoding
+  let Inst{40-32} = !if(P.HasSrc0, src0{8-0}, 0);
+  let Inst{49-41} = !if(P.HasSrc1, src1{8-0}, 0);
+  let Inst{58-50} = !if(P.HasSrc2, src2, 0);
+
+  let Inst{59}    = !if(P.HasSrc0, src0{9}, 0); // acc(0)
+  let Inst{60}    = !if(P.HasSrc1, src1{9}, 0); // acc(1)
+
+  let Inst{63-61} = !if(P.HasSrc1, blgp, 0);
+}
+
+
 class VOP3Pe_gfx10 <bits<10> op, VOPProfile P> : VOP3Pe<op, P> {
   let Inst{31-26} = 0x33; //encoding
 }
@@ -442,8 +473,7 @@ class VOP_SDWA9Be<VOPProfile P> : VOP_SDWA9e<P> {
 class VOP_SDWA_Pseudo <string opName, VOPProfile P, list<dag> pattern=[]> :
   InstSI <P.OutsSDWA, P.InsSDWA, "", pattern>,
   VOP <opName>,
-  SIMCInstr <opName#"_sdwa", SIEncodingFamily.NONE>,
-  MnemonicAlias <opName#"_sdwa", opName> {
+  SIMCInstr <opName#"_sdwa", SIEncodingFamily.NONE> {
 
   let isPseudo = 1;
   let isCodeGenOnly = 1;
@@ -564,8 +594,7 @@ class VOP_DPPe<VOPProfile P, bit IsDPP16=0> : Enc64 {
 class VOP_DPP_Pseudo <string OpName, VOPProfile P, list<dag> pattern=[]> :
   InstSI <P.OutsDPP, P.InsDPP, OpName#P.AsmDPP, pattern>,
   VOP <OpName>,
-  SIMCInstr <OpName#"_dpp", SIEncodingFamily.NONE>,
-  MnemonicAlias <OpName#"_dpp", OpName> {
+  SIMCInstr <OpName#"_dpp", SIEncodingFamily.NONE> {
 
   let isPseudo = 1;
   let isCodeGenOnly = 1;

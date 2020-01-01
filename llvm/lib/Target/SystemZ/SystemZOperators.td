@@ -191,6 +191,12 @@ def SDT_ZVecTernary         : SDTypeProfile<1, 3,
                                              SDTCisSameAs<0, 1>,
                                              SDTCisSameAs<0, 2>,
                                              SDTCisSameAs<0, 3>]>;
+def SDT_ZVecTernaryConvCC   : SDTypeProfile<2, 3,
+                                            [SDTCisVec<0>,
+                                             SDTCisVT<1, i32>,
+                                             SDTCisVec<2>,
+                                             SDTCisSameAs<2, 3>,
+                                             SDTCisSameAs<0, 4>]>;
 def SDT_ZVecTernaryInt      : SDTypeProfile<1, 3,
                                             [SDTCisVec<0>,
                                              SDTCisSameAs<0, 1>,
@@ -252,6 +258,10 @@ def z_pcrel_offset      : SDNode<"SystemZISD::PCREL_OFFSET",
 def z_iabs              : SDNode<"SystemZISD::IABS", SDTIntUnaryOp, []>;
 def z_icmp              : SDNode<"SystemZISD::ICMP", SDT_ZICmp>;
 def z_fcmp              : SDNode<"SystemZISD::FCMP", SDT_ZCmp>;
+def z_strict_fcmp       : SDNode<"SystemZISD::STRICT_FCMP", SDT_ZCmp,
+                                 [SDNPHasChain]>;
+def z_strict_fcmps      : SDNode<"SystemZISD::STRICT_FCMPS", SDT_ZCmp,
+                                 [SDNPHasChain]>;
 def z_tm                : SDNode<"SystemZISD::TM", SDT_ZICmp>;
 def z_br_ccmask_1       : SDNode<"SystemZISD::BR_CCMASK", SDT_ZBRCCMask,
                                  [SDNPHasChain]>;
@@ -277,6 +287,10 @@ def z_membarrier        : SDNode<"SystemZISD::MEMBARRIER", SDTNone,
 def z_loadbswap        : SDNode<"SystemZISD::LRV", SDTLoad,
                                  [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
 def z_storebswap       : SDNode<"SystemZISD::STRV", SDTStore,
+                                 [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
+def z_loadeswap        : SDNode<"SystemZISD::VLER", SDTLoad,
+                                 [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def z_storeeswap       : SDNode<"SystemZISD::VSTER", SDTStore,
                                  [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 
 def z_tdc               : SDNode<"SystemZISD::TDC", SDT_ZTest>;
@@ -318,13 +332,29 @@ def z_vicmpes           : SDNode<"SystemZISD::VICMPES", SDT_ZVecBinaryCC>;
 def z_vicmphs           : SDNode<"SystemZISD::VICMPHS", SDT_ZVecBinaryCC>;
 def z_vicmphls          : SDNode<"SystemZISD::VICMPHLS", SDT_ZVecBinaryCC>;
 def z_vfcmpe            : SDNode<"SystemZISD::VFCMPE", SDT_ZVecBinaryConv>;
+def z_strict_vfcmpe     : SDNode<"SystemZISD::STRICT_VFCMPE",
+                                 SDT_ZVecBinaryConv, [SDNPHasChain]>;
+def z_strict_vfcmpes    : SDNode<"SystemZISD::STRICT_VFCMPES",
+                                 SDT_ZVecBinaryConv, [SDNPHasChain]>;
 def z_vfcmph            : SDNode<"SystemZISD::VFCMPH", SDT_ZVecBinaryConv>;
+def z_strict_vfcmph     : SDNode<"SystemZISD::STRICT_VFCMPH",
+                                 SDT_ZVecBinaryConv, [SDNPHasChain]>;
+def z_strict_vfcmphs    : SDNode<"SystemZISD::STRICT_VFCMPHS",
+                                 SDT_ZVecBinaryConv, [SDNPHasChain]>;
 def z_vfcmphe           : SDNode<"SystemZISD::VFCMPHE", SDT_ZVecBinaryConv>;
+def z_strict_vfcmphe    : SDNode<"SystemZISD::STRICT_VFCMPHE",
+                                 SDT_ZVecBinaryConv, [SDNPHasChain]>;
+def z_strict_vfcmphes   : SDNode<"SystemZISD::STRICT_VFCMPHES",
+                                 SDT_ZVecBinaryConv, [SDNPHasChain]>;
 def z_vfcmpes           : SDNode<"SystemZISD::VFCMPES", SDT_ZVecBinaryConvCC>;
 def z_vfcmphs           : SDNode<"SystemZISD::VFCMPHS", SDT_ZVecBinaryConvCC>;
 def z_vfcmphes          : SDNode<"SystemZISD::VFCMPHES", SDT_ZVecBinaryConvCC>;
 def z_vextend           : SDNode<"SystemZISD::VEXTEND", SDT_ZVecUnaryConv>;
+def z_strict_vextend    : SDNode<"SystemZISD::STRICT_VEXTEND",
+                                 SDT_ZVecUnaryConv, [SDNPHasChain]>;
 def z_vround            : SDNode<"SystemZISD::VROUND", SDT_ZVecUnaryConv>;
+def z_strict_vround     : SDNode<"SystemZISD::STRICT_VROUND",
+                                 SDT_ZVecUnaryConv, [SDNPHasChain]>;
 def z_vtm               : SDNode<"SystemZISD::VTM", SDT_ZCmp>;
 def z_vfae_cc           : SDNode<"SystemZISD::VFAE_CC", SDT_ZVecTernaryIntCC>;
 def z_vfaez_cc          : SDNode<"SystemZISD::VFAEZ_CC", SDT_ZVecTernaryIntCC>;
@@ -337,6 +367,10 @@ def z_vstrc_cc          : SDNode<"SystemZISD::VSTRC_CC",
                                  SDT_ZVecQuaternaryIntCC>;
 def z_vstrcz_cc         : SDNode<"SystemZISD::VSTRCZ_CC",
                                  SDT_ZVecQuaternaryIntCC>;
+def z_vstrs_cc          : SDNode<"SystemZISD::VSTRS_CC",
+                                 SDT_ZVecTernaryConvCC>;
+def z_vstrsz_cc         : SDNode<"SystemZISD::VSTRSZ_CC",
+                                 SDT_ZVecTernaryConvCC>;
 def z_vftci             : SDNode<"SystemZISD::VFTCI", SDT_ZVecBinaryConvIntCC>;
 
 class AtomicWOp<string name, SDTypeProfile profile = SDT_ZAtomicLoadBinaryW>
@@ -458,17 +492,17 @@ def z_subcarry : PatFrag<(ops node:$lhs, node:$rhs),
                               (z_subcarry_1 node:$lhs, node:$rhs, CC)>;
 
 // Signed and unsigned comparisons.
-def z_scmp : PatFrag<(ops node:$a, node:$b), (z_icmp node:$a, node:$b, imm), [{
+def z_scmp : PatFrag<(ops node:$a, node:$b), (z_icmp node:$a, node:$b, timm), [{
   unsigned Type = cast<ConstantSDNode>(N->getOperand(2))->getZExtValue();
   return Type != SystemZICMP::UnsignedOnly;
 }]>;
-def z_ucmp : PatFrag<(ops node:$a, node:$b), (z_icmp node:$a, node:$b, imm), [{
+def z_ucmp : PatFrag<(ops node:$a, node:$b), (z_icmp node:$a, node:$b, timm), [{
   unsigned Type = cast<ConstantSDNode>(N->getOperand(2))->getZExtValue();
   return Type != SystemZICMP::SignedOnly;
 }]>;
 
 // Register- and memory-based TEST UNDER MASK.
-def z_tm_reg : PatFrag<(ops node:$a, node:$b), (z_tm node:$a, node:$b, imm)>;
+def z_tm_reg : PatFrag<(ops node:$a, node:$b), (z_tm node:$a, node:$b, timm)>;
 def z_tm_mem : PatFrag<(ops node:$a, node:$b), (z_tm node:$a, node:$b, 0)>;
 
 // Register sign-extend operations.  Sub-32-bit values are represented as i32s.
@@ -661,6 +695,18 @@ def z_usub : PatFrags<(ops node:$src1, node:$src2),
                       [(z_usubo node:$src1, node:$src2),
                        (sub node:$src1, node:$src2)]>;
 
+// Combined logical operations.
+def andc : PatFrag<(ops node:$src1, node:$src2),
+                   (and node:$src1, (not node:$src2))>;
+def orc  : PatFrag<(ops node:$src1, node:$src2),
+                   (or node:$src1, (not node:$src2))>;
+def nand : PatFrag<(ops node:$src1, node:$src2),
+                   (not (and node:$src1, node:$src2))>;
+def nor  : PatFrag<(ops node:$src1, node:$src2),
+                   (not (or node:$src1, node:$src2))>;
+def nxor : PatFrag<(ops node:$src1, node:$src2),
+                   (not (xor node:$src1, node:$src2))>;
+
 // Fused multiply-subtract, using the natural operand order.
 def any_fms : PatFrag<(ops node:$src1, node:$src2, node:$src3),
                       (any_fma node:$src1, node:$src2, (fneg node:$src3))>;
@@ -680,6 +726,26 @@ def any_fnms : PatFrag<(ops node:$src1, node:$src2, node:$src3),
 
 // Floating-point negative absolute.
 def fnabs : PatFrag<(ops node:$ptr), (fneg (fabs node:$ptr))>;
+
+// Strict floating-point fragments.
+def z_any_fcmp    : PatFrags<(ops node:$lhs, node:$rhs),
+                             [(z_strict_fcmp node:$lhs, node:$rhs),
+                              (z_fcmp node:$lhs, node:$rhs)]>;
+def z_any_vfcmpe  : PatFrags<(ops node:$lhs, node:$rhs),
+                             [(z_strict_vfcmpe node:$lhs, node:$rhs),
+                              (z_vfcmpe node:$lhs, node:$rhs)]>;
+def z_any_vfcmph  : PatFrags<(ops node:$lhs, node:$rhs),
+                             [(z_strict_vfcmph node:$lhs, node:$rhs),
+                              (z_vfcmph node:$lhs, node:$rhs)]>;
+def z_any_vfcmphe : PatFrags<(ops node:$lhs, node:$rhs),
+                             [(z_strict_vfcmphe node:$lhs, node:$rhs),
+                              (z_vfcmphe node:$lhs, node:$rhs)]>;
+def z_any_vextend : PatFrags<(ops node:$src),
+                             [(z_strict_vextend node:$src),
+                              (z_vextend node:$src)]>;
+def z_any_vround  : PatFrags<(ops node:$src),
+                             [(z_strict_vround node:$src),
+                              (z_vround node:$src)]>;
 
 // Create a unary operator that loads from memory and then performs
 // the given operation on it.
@@ -722,6 +788,10 @@ def z_replicate_loadi32 : z_replicate_load<i32, load>;
 def z_replicate_loadi64 : z_replicate_load<i64, load>;
 def z_replicate_loadf32 : z_replicate_load<f32, load>;
 def z_replicate_loadf64 : z_replicate_load<f64, load>;
+// Byte-swapped replicated vector element loads.
+def z_replicate_loadbswapi16 : z_replicate_load<i32, z_loadbswap16>;
+def z_replicate_loadbswapi32 : z_replicate_load<i32, z_loadbswap32>;
+def z_replicate_loadbswapi64 : z_replicate_load<i64, z_loadbswap64>;
 
 // Load a scalar and insert it into a single element of a vector.
 class z_vle<ValueType scalartype, SDPatternOperator load>
@@ -734,6 +804,10 @@ def z_vlei32 : z_vle<i32, load>;
 def z_vlei64 : z_vle<i64, load>;
 def z_vlef32 : z_vle<f32, load>;
 def z_vlef64 : z_vle<f64, load>;
+// Byte-swapped vector element loads.
+def z_vlebri16 : z_vle<i32, z_loadbswap16>;
+def z_vlebri32 : z_vle<i32, z_loadbswap32>;
+def z_vlebri64 : z_vle<i64, z_loadbswap64>;
 
 // Load a scalar and insert it into the low element of the high i64 of a
 // zeroed vector.
@@ -778,6 +852,18 @@ def z_vllezlf32 : PatFrag<(ops node:$addr),
                            (v2i64
                             (bitconvert (v4f32 immAllZerosV))))>;
 
+// Byte-swapped variants.
+def z_vllebrzi16  : z_vllez<i32, z_loadbswap16, 3>;
+def z_vllebrzi32  : z_vllez<i32, z_loadbswap32, 1>;
+def z_vllebrzli32 : z_vllez<i32, z_loadbswap32, 0>;
+def z_vllebrzi64  : PatFrags<(ops node:$addr),
+                             [(z_vector_insert immAllZerosV,
+                                               (i64 (z_loadbswap64 node:$addr)),
+                                               (i32 0)),
+                              (z_join_dwords (i64 (z_loadbswap64 node:$addr)),
+                                             (i64 0))]>;
+
+
 // Store one element of a vector.
 class z_vste<ValueType scalartype, SDPatternOperator store>
   : PatFrag<(ops node:$vec, node:$addr, node:$index),
@@ -789,6 +875,10 @@ def z_vstei32 : z_vste<i32, store>;
 def z_vstei64 : z_vste<i64, store>;
 def z_vstef32 : z_vste<f32, store>;
 def z_vstef64 : z_vste<f64, store>;
+// Byte-swapped vector element stores.
+def z_vstebri16 : z_vste<i32, z_storebswap16>;
+def z_vstebri32 : z_vste<i32, z_storebswap32>;
+def z_vstebri64 : z_vste<i64, z_storebswap64>;
 
 // Arithmetic negation on vectors.
 def z_vneg : PatFrag<(ops node:$x), (sub immAllZerosV, node:$x)>;

@@ -19,11 +19,13 @@
 #include "CodeGenModule.h"
 #include "CodeGenTypes.h"
 #include "TargetInfo.h"
-#include "clang/CodeGen/ConstantInitBuilder.h"
+#include "clang/AST/Attr.h"
+#include "clang/AST/CXXInheritance.h"
 #include "clang/AST/Decl.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/AST/VTableBuilder.h"
+#include "clang/CodeGen/ConstantInitBuilder.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/IR/Intrinsics.h"
@@ -258,7 +260,8 @@ public:
 
   void EmitDestructorCall(CodeGenFunction &CGF, const CXXDestructorDecl *DD,
                           CXXDtorType Type, bool ForVirtualBase,
-                          bool Delegating, Address This) override;
+                          bool Delegating, Address This,
+                          QualType ThisTy) override;
 
   void emitVTableTypeMetadata(const VPtrInfo &Info, const CXXRecordDecl *RD,
                               llvm::GlobalVariable *VTable);
@@ -296,9 +299,8 @@ public:
 
   llvm::Value *EmitVirtualDestructorCall(CodeGenFunction &CGF,
                                          const CXXDestructorDecl *Dtor,
-                                         CXXDtorType DtorType,
-                                         Address This,
-                                         const CXXMemberCallExpr *CE) override;
+                                         CXXDtorType DtorType, Address This,
+                                         DeleteOrMemberCallExpr E) override;
 
   void adjustCallArgsForDestructorThunk(CodeGenFunction &CGF, GlobalDecl GD,
                                         CallArgList &CallArgs) override {
@@ -352,7 +354,7 @@ public:
             ? llvm::GlobalValue::LinkOnceODRLinkage
             : llvm::GlobalValue::InternalLinkage;
     auto *VDispMap = new llvm::GlobalVariable(
-        CGM.getModule(), VDispMapTy, /*Constant=*/true, Linkage,
+        CGM.getModule(), VDispMapTy, /*isConstant=*/true, Linkage,
         /*Initializer=*/Init, MangledName);
     return VDispMap;
   }
@@ -386,7 +388,9 @@ public:
       ArrayRef<llvm::Function *> CXXThreadLocalInits,
       ArrayRef<const VarDecl *> CXXThreadLocalInitVars) override;
 
-  bool usesThreadWrapperFunction() const override { return false; }
+  bool usesThreadWrapperFunction(const VarDecl *VD) const override {
+    return false;
+  }
   LValue EmitThreadLocalVarDeclLValue(CodeGenFunction &CGF, const VarDecl *VD,
                                       QualType LValType) override;
 
@@ -436,7 +440,7 @@ public:
   friend struct MSRTTIBuilder;
 
   bool isImageRelative() const {
-    return CGM.getTarget().getPointerWidth(/*AddressSpace=*/0) == 64;
+    return CGM.getTarget().getPointerWidth(/*AddrSpace=*/0) == 64;
   }
 
   // 5 routines for constructing the llvm types for MS RTTI structs.
@@ -617,6 +621,9 @@ private:
   llvm::Function *EmitVirtualMemPtrThunk(const CXXMethodDecl *MD,
                                          const MethodVFTableLocation &ML);
 
+  llvm::Constant *EmitMemberDataPointer(const CXXRecordDecl *RD,
+                                        CharUnits offset);
+
 public:
   llvm::Type *ConvertMemberPointerType(const MemberPointerType *MPT) override;
 
@@ -730,7 +737,7 @@ public:
     // which describes the exception.
     llvm::Type *Args[] = {CGM.Int8PtrTy, getThrowInfoType()->getPointerTo()};
     llvm::FunctionType *FTy =
-        llvm::FunctionType::get(CGM.VoidTy, Args, /*IsVarArgs=*/false);
+        llvm::FunctionType::get(CGM.VoidTy, Args, /*isVarArg=*/false);
     llvm::FunctionCallee Throw =
         CGM.CreateRuntimeFunction(FTy, "_CxxThrowException");
     // _CxxThrowException is stdcall on 32-bit x86 platforms.
@@ -844,8 +851,7 @@ void MicrosoftCXXABI::emitVirtualObjectDelete(CodeGenFunction &CGF,
   // CXXMemberCallExpr for dtor call.
   bool UseGlobalDelete = DE->isGlobalDelete();
   CXXDtorType DtorType = UseGlobalDelete ? Dtor_Complete : Dtor_Deleting;
-  llvm::Value *MDThis =
-      EmitVirtualDestructorCall(CGF, Dtor, DtorType, Ptr, /*CE=*/nullptr);
+  llvm::Value *MDThis = EmitVirtualDestructorCall(CGF, Dtor, DtorType, Ptr, DE);
   if (UseGlobalDelete)
     CGF.EmitDeleteCall(DE->getOperatorDelete(), MDThis, ElementType);
 }
@@ -1209,7 +1215,7 @@ static bool hasDefaultCXXMethodCC(ASTContext &Context,
   CallingConv ExpectedCallingConv = Context.getDefaultCallingConvention(
       /*IsVariadic=*/false, /*IsCXXMethod=*/true);
   CallingConv ActualCallingConv =
-      MD->getType()->getAs<FunctionProtoType>()->getCallConv();
+      MD->getType()->castAs<FunctionProtoType>()->getCallConv();
   return ExpectedCallingConv == ActualCallingConv;
 }
 
@@ -1313,7 +1319,7 @@ llvm::GlobalValue::LinkageTypes MicrosoftCXXABI::getCXXDestructorLinkage(
     // The base destructor most closely tracks the user-declared constructor, so
     // we delegate back to the normal declarator case.
     return CGM.getLLVMLinkageForDeclarator(Dtor, Linkage,
-                                           /*isConstantVariable=*/false);
+                                           /*IsConstantVariable=*/false);
   case Dtor_Complete:
     // The complete destructor is like an inline function, but it may be
     // imported and therefore must be exported as well. This requires changing
@@ -1338,6 +1344,13 @@ void MicrosoftCXXABI::EmitCXXDestructors(const CXXDestructorDecl *D) {
   // The TU defining a dtor is only guaranteed to emit a base destructor.  All
   // other destructor variants are delegating thunks.
   CGM.EmitGlobal(GlobalDecl(D, Dtor_Base));
+
+  // If the class is dllexported, emit the complete (vbase) destructor wherever
+  // the base dtor is emitted.
+  // FIXME: To match MSVC, this should only be done when the class is exported
+  // with -fdllexport-inlines enabled.
+  if (D->getParent()->getNumVBases() > 0 && D->hasAttr<DLLExportAttr>())
+    CGM.EmitGlobal(GlobalDecl(D, Dtor_Complete));
 }
 
 CharUnits
@@ -1569,7 +1582,8 @@ CGCXXABI::AddedStructorArgs MicrosoftCXXABI::addImplicitConstructorArgs(
 void MicrosoftCXXABI::EmitDestructorCall(CodeGenFunction &CGF,
                                          const CXXDestructorDecl *DD,
                                          CXXDtorType Type, bool ForVirtualBase,
-                                         bool Delegating, Address This) {
+                                         bool Delegating, Address This,
+                                         QualType ThisTy) {
   // Use the base destructor variant in place of the complete destructor variant
   // if the class has no virtual bases. This effectively implements some of the
   // -mconstructor-aliases optimization, but as part of the MS C++ ABI.
@@ -1591,7 +1605,7 @@ void MicrosoftCXXABI::EmitDestructorCall(CodeGenFunction &CGF,
     BaseDtorEndBB = EmitDtorCompleteObjectHandler(CGF);
   }
 
-  CGF.EmitCXXDestructorCall(GD, Callee, This.getPointer(),
+  CGF.EmitCXXDestructorCall(GD, Callee, This.getPointer(), ThisTy,
                             /*ImplicitParam=*/nullptr,
                             /*ImplicitParamTy=*/QualType(), nullptr);
   if (BaseDtorEndBB) {
@@ -1900,7 +1914,10 @@ CGCallee MicrosoftCXXABI::getVirtualFunctionPointer(CodeGenFunction &CGF,
 
 llvm::Value *MicrosoftCXXABI::EmitVirtualDestructorCall(
     CodeGenFunction &CGF, const CXXDestructorDecl *Dtor, CXXDtorType DtorType,
-    Address This, const CXXMemberCallExpr *CE) {
+    Address This, DeleteOrMemberCallExpr E) {
+  auto *CE = E.dyn_cast<const CXXMemberCallExpr *>();
+  auto *D = E.dyn_cast<const CXXDeleteExpr *>();
+  assert((CE != nullptr) ^ (D != nullptr));
   assert(CE == nullptr || CE->arg_begin() == CE->arg_end());
   assert(DtorType == Dtor_Deleting || DtorType == Dtor_Complete);
 
@@ -1917,8 +1934,15 @@ llvm::Value *MicrosoftCXXABI::EmitVirtualDestructorCall(
       llvm::IntegerType::getInt32Ty(CGF.getLLVMContext()),
       DtorType == Dtor_Deleting);
 
+  QualType ThisTy;
+  if (CE) {
+    ThisTy = CE->getObjectType();
+  } else {
+    ThisTy = D->getDestroyedType();
+  }
+
   This = adjustThisArgumentForVirtualFunctionCall(CGF, GD, This, true);
-  RValue RV = CGF.EmitCXXDestructorCall(GD, Callee, This.getPointer(),
+  RValue RV = CGF.EmitCXXDestructorCall(GD, Callee, This.getPointer(), ThisTy,
                                         ImplicitParam, Context.IntTy, CE);
   return RV.getScalarVal();
 }
@@ -2250,7 +2274,7 @@ static void emitGlobalDtorWithTLRegDtor(CodeGenFunction &CGF, const VarDecl &VD,
 
   // extern "C" int __tlregdtor(void (*f)(void));
   llvm::FunctionType *TLRegDtorTy = llvm::FunctionType::get(
-      CGF.IntTy, DtorStub->getType(), /*IsVarArg=*/false);
+      CGF.IntTy, DtorStub->getType(), /*isVarArg=*/false);
 
   llvm::FunctionCallee TLRegDtor = CGF.CGM.CreateRuntimeFunction(
       TLRegDtorTy, "__tlregdtor", llvm::AttributeList(), /*Local=*/true);
@@ -2291,7 +2315,7 @@ void MicrosoftCXXABI::EmitThreadLocalInitFuncs(
   // pointers at start-up time and, eventually, at thread-creation time.
   auto AddToXDU = [&CGM](llvm::Function *InitFunc) {
     llvm::GlobalVariable *InitFuncPtr = new llvm::GlobalVariable(
-        CGM.getModule(), InitFunc->getType(), /*IsConstant=*/true,
+        CGM.getModule(), InitFunc->getType(), /*isConstant=*/true,
         llvm::GlobalVariable::InternalLinkage, InitFunc,
         Twine(InitFunc->getName(), "$initializer$"));
     InitFuncPtr->setSection(".CRT$XDU");
@@ -2340,10 +2364,10 @@ static ConstantAddress getInitThreadEpochPtr(CodeGenModule &CGM) {
     return ConstantAddress(GV, Align);
   auto *GV = new llvm::GlobalVariable(
       CGM.getModule(), CGM.IntTy,
-      /*Constant=*/false, llvm::GlobalVariable::ExternalLinkage,
+      /*isConstant=*/false, llvm::GlobalVariable::ExternalLinkage,
       /*Initializer=*/nullptr, VarName,
       /*InsertBefore=*/nullptr, llvm::GlobalVariable::GeneralDynamicTLSModel);
-  GV->setAlignment(Align.getQuantity());
+  GV->setAlignment(Align.getAsAlign());
   return ConstantAddress(GV, Align);
 }
 
@@ -2486,7 +2510,7 @@ void MicrosoftCXXABI::EmitGuardedInit(CodeGenFunction &CGF, const VarDecl &D,
                                  GV->getLinkage(), Zero, GuardName.str());
     GuardVar->setVisibility(GV->getVisibility());
     GuardVar->setDLLStorageClass(GV->getDLLStorageClass());
-    GuardVar->setAlignment(GuardAlign.getQuantity());
+    GuardVar->setAlignment(GuardAlign.getAsAlign());
     if (GuardVar->isWeakForLinker())
       GuardVar->setComdat(
           CGM.getModule().getOrInsertComdat(GuardVar->getName()));
@@ -2589,27 +2613,27 @@ bool MicrosoftCXXABI::isZeroInitializable(const MemberPointerType *MPT) {
   // we can't zero initialize.  The field offset is sometimes also -1 if 0 is a
   // valid field offset.
   const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
-  return (!MSInheritanceAttr::hasVBTableOffsetField(Inheritance) &&
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
+  return (!inheritanceModelHasVBTableOffsetField(Inheritance) &&
           RD->nullFieldOffsetIsZero());
 }
 
 llvm::Type *
 MicrosoftCXXABI::ConvertMemberPointerType(const MemberPointerType *MPT) {
   const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
   llvm::SmallVector<llvm::Type *, 4> fields;
   if (MPT->isMemberFunctionPointer())
     fields.push_back(CGM.VoidPtrTy);  // FunctionPointerOrVirtualThunk
   else
     fields.push_back(CGM.IntTy);  // FieldOffset
 
-  if (MSInheritanceAttr::hasNVOffsetField(MPT->isMemberFunctionPointer(),
-                                          Inheritance))
+  if (inheritanceModelHasNVOffsetField(MPT->isMemberFunctionPointer(),
+                                       Inheritance))
     fields.push_back(CGM.IntTy);
-  if (MSInheritanceAttr::hasVBPtrOffsetField(Inheritance))
+  if (inheritanceModelHasVBPtrOffsetField(Inheritance))
     fields.push_back(CGM.IntTy);
-  if (MSInheritanceAttr::hasVBTableOffsetField(Inheritance))
+  if (inheritanceModelHasVBTableOffsetField(Inheritance))
     fields.push_back(CGM.IntTy);  // VirtualBaseAdjustmentOffset
 
   if (fields.size() == 1)
@@ -2622,7 +2646,7 @@ GetNullMemberPointerFields(const MemberPointerType *MPT,
                            llvm::SmallVectorImpl<llvm::Constant *> &fields) {
   assert(fields.empty());
   const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
   if (MPT->isMemberFunctionPointer()) {
     // FunctionPointerOrVirtualThunk
     fields.push_back(llvm::Constant::getNullValue(CGM.VoidPtrTy));
@@ -2633,12 +2657,12 @@ GetNullMemberPointerFields(const MemberPointerType *MPT,
       fields.push_back(getAllOnesInt());  // FieldOffset
   }
 
-  if (MSInheritanceAttr::hasNVOffsetField(MPT->isMemberFunctionPointer(),
-                                          Inheritance))
+  if (inheritanceModelHasNVOffsetField(MPT->isMemberFunctionPointer(),
+                                       Inheritance))
     fields.push_back(getZeroInt());
-  if (MSInheritanceAttr::hasVBPtrOffsetField(Inheritance))
+  if (inheritanceModelHasVBPtrOffsetField(Inheritance))
     fields.push_back(getZeroInt());
-  if (MSInheritanceAttr::hasVBTableOffsetField(Inheritance))
+  if (inheritanceModelHasVBTableOffsetField(Inheritance))
     fields.push_back(getAllOnesInt());
 }
 
@@ -2659,21 +2683,21 @@ MicrosoftCXXABI::EmitFullMemberPointer(llvm::Constant *FirstField,
                                        const CXXRecordDecl *RD,
                                        CharUnits NonVirtualBaseAdjustment,
                                        unsigned VBTableIndex) {
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
 
   // Single inheritance class member pointer are represented as scalars instead
   // of aggregates.
-  if (MSInheritanceAttr::hasOnlyOneField(IsMemberFunction, Inheritance))
+  if (inheritanceModelHasOnlyOneField(IsMemberFunction, Inheritance))
     return FirstField;
 
   llvm::SmallVector<llvm::Constant *, 4> fields;
   fields.push_back(FirstField);
 
-  if (MSInheritanceAttr::hasNVOffsetField(IsMemberFunction, Inheritance))
+  if (inheritanceModelHasNVOffsetField(IsMemberFunction, Inheritance))
     fields.push_back(llvm::ConstantInt::get(
       CGM.IntTy, NonVirtualBaseAdjustment.getQuantity()));
 
-  if (MSInheritanceAttr::hasVBPtrOffsetField(Inheritance)) {
+  if (inheritanceModelHasVBPtrOffsetField(Inheritance)) {
     CharUnits Offs = CharUnits::Zero();
     if (VBTableIndex)
       Offs = getContext().getASTRecordLayout(RD).getVBPtrOffset();
@@ -2681,7 +2705,7 @@ MicrosoftCXXABI::EmitFullMemberPointer(llvm::Constant *FirstField,
   }
 
   // The rest of the fields are adjusted by conversions to a more derived class.
-  if (MSInheritanceAttr::hasVBTableOffsetField(Inheritance))
+  if (inheritanceModelHasVBTableOffsetField(Inheritance))
     fields.push_back(llvm::ConstantInt::get(CGM.IntTy, VBTableIndex));
 
   return llvm::ConstantStruct::getAnon(fields);
@@ -2690,9 +2714,13 @@ MicrosoftCXXABI::EmitFullMemberPointer(llvm::Constant *FirstField,
 llvm::Constant *
 MicrosoftCXXABI::EmitMemberDataPointer(const MemberPointerType *MPT,
                                        CharUnits offset) {
-  const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
+  return EmitMemberDataPointer(MPT->getMostRecentCXXRecordDecl(), offset);
+}
+
+llvm::Constant *MicrosoftCXXABI::EmitMemberDataPointer(const CXXRecordDecl *RD,
+                                                       CharUnits offset) {
   if (RD->getMSInheritanceModel() ==
-      MSInheritanceAttr::Keyword_virtual_inheritance)
+      MSInheritanceModel::Virtual)
     offset -= getContext().getOffsetOfBaseWithVBPtr(RD);
   llvm::Constant *FirstField =
     llvm::ConstantInt::get(CGM.IntTy, offset.getQuantity());
@@ -2714,8 +2742,17 @@ llvm::Constant *MicrosoftCXXABI::EmitMemberPointer(const APValue &MP,
   if (const CXXMethodDecl *MD = dyn_cast<CXXMethodDecl>(MPD)) {
     C = EmitMemberFunctionPointer(MD);
   } else {
+    // For a pointer to data member, start off with the offset of the field in
+    // the class in which it was declared, and convert from there if necessary.
+    // For indirect field decls, get the outermost anonymous field and use the
+    // parent class.
     CharUnits FieldOffset = Ctx.toCharUnitsFromBits(Ctx.getFieldOffset(MPD));
-    C = EmitMemberDataPointer(DstTy, FieldOffset);
+    const FieldDecl *FD = dyn_cast<FieldDecl>(MPD);
+    if (!FD)
+      FD = cast<FieldDecl>(*cast<IndirectFieldDecl>(MPD)->chain_begin());
+    const CXXRecordDecl *RD = cast<CXXRecordDecl>(FD->getParent());
+    RD = RD->getMostRecentNonInjectedDecl();
+    C = EmitMemberDataPointer(RD, FieldOffset);
   }
 
   if (!MemberPointerPath.empty()) {
@@ -2789,7 +2826,7 @@ MicrosoftCXXABI::EmitMemberFunctionPointer(const CXXMethodDecl *MD) {
 
   if (VBTableIndex == 0 &&
       RD->getMSInheritanceModel() ==
-          MSInheritanceAttr::Keyword_virtual_inheritance)
+          MSInheritanceModel::Virtual)
     NonVirtualBaseAdjustment -= getContext().getOffsetOfBaseWithVBPtr(RD);
 
   // The rest of the fields are common with data member pointers.
@@ -2825,9 +2862,9 @@ MicrosoftCXXABI::EmitMemberPointerComparison(CodeGenFunction &CGF,
   // If this is a single field member pointer (single inheritance), this is a
   // single icmp.
   const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
-  if (MSInheritanceAttr::hasOnlyOneField(MPT->isMemberFunctionPointer(),
-                                         Inheritance))
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
+  if (inheritanceModelHasOnlyOneField(MPT->isMemberFunctionPointer(),
+                                      Inheritance))
     return Builder.CreateICmp(Eq, L, R);
 
   // Compare the first field.
@@ -3027,7 +3064,7 @@ llvm::Value *MicrosoftCXXABI::EmitMemberDataPointerAddress(
       CGF.ConvertTypeForMem(MPT->getPointeeType())->getPointerTo(AS);
   CGBuilderTy &Builder = CGF.Builder;
   const CXXRecordDecl *RD = MPT->getMostRecentCXXRecordDecl();
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
 
   // Extract the fields we need, regardless of model.  We'll apply them if we
   // have them.
@@ -3038,9 +3075,9 @@ llvm::Value *MicrosoftCXXABI::EmitMemberDataPointerAddress(
     // We need to extract values.
     unsigned I = 0;
     FieldOffset = Builder.CreateExtractValue(MemPtr, I++);
-    if (MSInheritanceAttr::hasVBPtrOffsetField(Inheritance))
+    if (inheritanceModelHasVBPtrOffsetField(Inheritance))
       VBPtrOffset = Builder.CreateExtractValue(MemPtr, I++);
-    if (MSInheritanceAttr::hasVBTableOffsetField(Inheritance))
+    if (inheritanceModelHasVBTableOffsetField(Inheritance))
       VirtualBaseAdjustmentOffset = Builder.CreateExtractValue(MemPtr, I++);
   }
 
@@ -3135,8 +3172,8 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
     CGBuilderTy &Builder) {
   const CXXRecordDecl *SrcRD = SrcTy->getMostRecentCXXRecordDecl();
   const CXXRecordDecl *DstRD = DstTy->getMostRecentCXXRecordDecl();
-  MSInheritanceAttr::Spelling SrcInheritance = SrcRD->getMSInheritanceModel();
-  MSInheritanceAttr::Spelling DstInheritance = DstRD->getMSInheritanceModel();
+  MSInheritanceModel SrcInheritance = SrcRD->getMSInheritanceModel();
+  MSInheritanceModel DstInheritance = DstRD->getMSInheritanceModel();
   bool IsFunc = SrcTy->isMemberFunctionPointer();
   bool IsConstant = isa<llvm::Constant>(Src);
 
@@ -3145,15 +3182,15 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
   llvm::Value *NonVirtualBaseAdjustment = getZeroInt();
   llvm::Value *VirtualBaseAdjustmentOffset = getZeroInt();
   llvm::Value *VBPtrOffset = getZeroInt();
-  if (!MSInheritanceAttr::hasOnlyOneField(IsFunc, SrcInheritance)) {
+  if (!inheritanceModelHasOnlyOneField(IsFunc, SrcInheritance)) {
     // We need to extract values.
     unsigned I = 0;
     FirstField = Builder.CreateExtractValue(Src, I++);
-    if (MSInheritanceAttr::hasNVOffsetField(IsFunc, SrcInheritance))
+    if (inheritanceModelHasNVOffsetField(IsFunc, SrcInheritance))
       NonVirtualBaseAdjustment = Builder.CreateExtractValue(Src, I++);
-    if (MSInheritanceAttr::hasVBPtrOffsetField(SrcInheritance))
+    if (inheritanceModelHasVBPtrOffsetField(SrcInheritance))
       VBPtrOffset = Builder.CreateExtractValue(Src, I++);
-    if (MSInheritanceAttr::hasVBTableOffsetField(SrcInheritance))
+    if (inheritanceModelHasVBTableOffsetField(SrcInheritance))
       VirtualBaseAdjustmentOffset = Builder.CreateExtractValue(Src, I++);
   }
 
@@ -3172,7 +3209,7 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
   // adjustment to normalize the member pointer.
   llvm::Value *SrcVBIndexEqZero =
       Builder.CreateICmpEQ(VirtualBaseAdjustmentOffset, getZeroInt());
-  if (SrcInheritance == MSInheritanceAttr::Keyword_virtual_inheritance) {
+  if (SrcInheritance == MSInheritanceModel::Virtual) {
     if (int64_t SrcOffsetToFirstVBase =
             getContext().getOffsetOfBaseWithVBPtr(SrcRD).getQuantity()) {
       llvm::Value *UndoSrcAdjustment = Builder.CreateSelect(
@@ -3206,8 +3243,8 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
   // Update the vbindex to an appropriate value in the destination because
   // SrcRD's vbtable might not be a strict prefix of the one in DstRD.
   llvm::Value *DstVBIndexEqZero = SrcVBIndexEqZero;
-  if (MSInheritanceAttr::hasVBTableOffsetField(DstInheritance) &&
-      MSInheritanceAttr::hasVBTableOffsetField(SrcInheritance)) {
+  if (inheritanceModelHasVBTableOffsetField(DstInheritance) &&
+      inheritanceModelHasVBTableOffsetField(SrcInheritance)) {
     if (llvm::GlobalVariable *VDispMap =
             getAddrOfVirtualDisplacementMap(SrcRD, DstRD)) {
       llvm::Value *VBIndex = Builder.CreateExactUDiv(
@@ -3230,7 +3267,7 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
 
   // Set the VBPtrOffset to zero if the vbindex is zero.  Otherwise, initialize
   // it to the offset of the vbptr.
-  if (MSInheritanceAttr::hasVBPtrOffsetField(DstInheritance)) {
+  if (inheritanceModelHasVBPtrOffsetField(DstInheritance)) {
     llvm::Value *DstVBPtrOffset = llvm::ConstantInt::get(
         CGM.IntTy,
         getContext().getASTRecordLayout(DstRD).getVBPtrOffset().getQuantity());
@@ -3241,7 +3278,7 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
   // Likewise, apply a similar adjustment so that dereferencing the member
   // pointer correctly accounts for the distance between the start of the first
   // virtual base and the top of the MDC.
-  if (DstInheritance == MSInheritanceAttr::Keyword_virtual_inheritance) {
+  if (DstInheritance == MSInheritanceModel::Virtual) {
     if (int64_t DstOffsetToFirstVBase =
             getContext().getOffsetOfBaseWithVBPtr(DstRD).getQuantity()) {
       llvm::Value *DoDstAdjustment = Builder.CreateSelect(
@@ -3254,17 +3291,17 @@ llvm::Value *MicrosoftCXXABI::EmitNonNullMemberPointerConversion(
 
   // Recompose dst from the null struct and the adjusted fields from src.
   llvm::Value *Dst;
-  if (MSInheritanceAttr::hasOnlyOneField(IsFunc, DstInheritance)) {
+  if (inheritanceModelHasOnlyOneField(IsFunc, DstInheritance)) {
     Dst = FirstField;
   } else {
     Dst = llvm::UndefValue::get(ConvertMemberPointerType(DstTy));
     unsigned Idx = 0;
     Dst = Builder.CreateInsertValue(Dst, FirstField, Idx++);
-    if (MSInheritanceAttr::hasNVOffsetField(IsFunc, DstInheritance))
+    if (inheritanceModelHasNVOffsetField(IsFunc, DstInheritance))
       Dst = Builder.CreateInsertValue(Dst, NonVirtualBaseAdjustment, Idx++);
-    if (MSInheritanceAttr::hasVBPtrOffsetField(DstInheritance))
+    if (inheritanceModelHasVBPtrOffsetField(DstInheritance))
       Dst = Builder.CreateInsertValue(Dst, VBPtrOffset, Idx++);
-    if (MSInheritanceAttr::hasVBTableOffsetField(DstInheritance))
+    if (inheritanceModelHasVBTableOffsetField(DstInheritance))
       Dst = Builder.CreateInsertValue(Dst, VirtualBaseAdjustmentOffset, Idx++);
   }
   return Dst;
@@ -3320,7 +3357,7 @@ CGCallee MicrosoftCXXABI::EmitLoadOfMemberFunctionPointer(
       CGM.getTypes().arrangeCXXMethodType(RD, FPT, /*FD=*/nullptr));
   CGBuilderTy &Builder = CGF.Builder;
 
-  MSInheritanceAttr::Spelling Inheritance = RD->getMSInheritanceModel();
+  MSInheritanceModel Inheritance = RD->getMSInheritanceModel();
 
   // Extract the fields we need, regardless of model.  We'll apply them if we
   // have them.
@@ -3332,11 +3369,11 @@ CGCallee MicrosoftCXXABI::EmitLoadOfMemberFunctionPointer(
     // We need to extract values.
     unsigned I = 0;
     FunctionPointer = Builder.CreateExtractValue(MemPtr, I++);
-    if (MSInheritanceAttr::hasNVOffsetField(MPT, Inheritance))
+    if (inheritanceModelHasNVOffsetField(MPT, Inheritance))
       NonVirtualBaseAdjustment = Builder.CreateExtractValue(MemPtr, I++);
-    if (MSInheritanceAttr::hasVBPtrOffsetField(Inheritance))
+    if (inheritanceModelHasVBPtrOffsetField(Inheritance))
       VBPtrOffset = Builder.CreateExtractValue(MemPtr, I++);
-    if (MSInheritanceAttr::hasVBTableOffsetField(Inheritance))
+    if (inheritanceModelHasVBTableOffsetField(Inheritance))
       VirtualBaseAdjustmentOffset = Builder.CreateExtractValue(MemPtr, I++);
   }
 
@@ -3400,7 +3437,7 @@ static llvm::GlobalVariable *getTypeInfoVTable(CodeGenModule &CGM) {
   if (auto VTable = CGM.getModule().getNamedGlobal(MangledName))
     return VTable;
   return new llvm::GlobalVariable(CGM.getModule(), CGM.Int8PtrTy,
-                                  /*Constant=*/true,
+                                  /*isConstant=*/true,
                                   llvm::GlobalVariable::ExternalLinkage,
                                   /*Initializer=*/nullptr, MangledName);
 }
@@ -3580,7 +3617,7 @@ llvm::GlobalVariable *MSRTTIBuilder::getClassHierarchyDescriptor() {
 
   // Forward-declare the class hierarchy descriptor
   auto Type = ABI.getClassHierarchyDescriptorType();
-  auto CHD = new llvm::GlobalVariable(Module, Type, /*Constant=*/true, Linkage,
+  auto CHD = new llvm::GlobalVariable(Module, Type, /*isConstant=*/true, Linkage,
                                       /*Initializer=*/nullptr,
                                       MangledName);
   if (CHD->isWeakForLinker())
@@ -3619,7 +3656,7 @@ MSRTTIBuilder::getBaseClassArray(SmallVectorImpl<MSRTTIClass> &Classes) {
   auto *ArrType = llvm::ArrayType::get(PtrType, Classes.size() + 1);
   auto *BCA =
       new llvm::GlobalVariable(Module, ArrType,
-                               /*Constant=*/true, Linkage,
+                               /*isConstant=*/true, Linkage,
                                /*Initializer=*/nullptr, MangledName);
   if (BCA->isWeakForLinker())
     BCA->setComdat(CGM.getModule().getOrInsertComdat(BCA->getName()));
@@ -3661,7 +3698,7 @@ MSRTTIBuilder::getBaseClassDescriptor(const MSRTTIClass &Class) {
   // Forward-declare the base class descriptor.
   auto Type = ABI.getBaseClassDescriptorType();
   auto BCD =
-      new llvm::GlobalVariable(Module, Type, /*Constant=*/true, Linkage,
+      new llvm::GlobalVariable(Module, Type, /*isConstant=*/true, Linkage,
                                /*Initializer=*/nullptr, MangledName);
   if (BCD->isWeakForLinker())
     BCD->setComdat(CGM.getModule().getOrInsertComdat(BCD->getName()));
@@ -3707,7 +3744,7 @@ MSRTTIBuilder::getCompleteObjectLocator(const VPtrInfo &Info) {
 
   // Forward-declare the complete object locator.
   llvm::StructType *Type = ABI.getCompleteObjectLocatorType();
-  auto COL = new llvm::GlobalVariable(Module, Type, /*Constant=*/true, Linkage,
+  auto COL = new llvm::GlobalVariable(Module, Type, /*isConstant=*/true, Linkage,
     /*Initializer=*/nullptr, MangledName);
 
   // Initialize the CompleteObjectLocator.
@@ -3822,7 +3859,7 @@ llvm::Constant *MicrosoftCXXABI::getAddrOfRTTIDescriptor(QualType Type) {
   llvm::StructType *TypeDescriptorType =
       getTypeDescriptorType(TypeInfoString);
   auto *Var = new llvm::GlobalVariable(
-      CGM.getModule(), TypeDescriptorType, /*Constant=*/false,
+      CGM.getModule(), TypeDescriptorType, /*isConstant=*/false,
       getLinkageForRTTI(Type),
       llvm::ConstantStruct::get(TypeDescriptorType, Fields),
       MangledName);
@@ -4061,7 +4098,7 @@ llvm::Constant *MicrosoftCXXABI::getCatchableType(QualType T,
   };
   llvm::StructType *CTType = getCatchableTypeType();
   auto *GV = new llvm::GlobalVariable(
-      CGM.getModule(), CTType, /*Constant=*/true, getLinkageForRTTI(T),
+      CGM.getModule(), CTType, /*isConstant=*/true, getLinkageForRTTI(T),
       llvm::ConstantStruct::get(CTType, Fields), MangledName);
   GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   GV->setSection(".xdata");
@@ -4179,7 +4216,7 @@ llvm::GlobalVariable *MicrosoftCXXABI::getCatchableTypeArray(QualType T) {
     getMangleContext().mangleCXXCatchableTypeArray(T, NumEntries, Out);
   }
   CTA = new llvm::GlobalVariable(
-      CGM.getModule(), CTAType, /*Constant=*/true, getLinkageForRTTI(T),
+      CGM.getModule(), CTAType, /*isConstant=*/true, getLinkageForRTTI(T),
       llvm::ConstantStruct::get(CTAType, Fields), MangledName);
   CTA->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   CTA->setSection(".xdata");
@@ -4248,7 +4285,7 @@ llvm::GlobalVariable *MicrosoftCXXABI::getThrowInfo(QualType T) {
       PointerToCatchableTypes                   // CatchableTypeArray
   };
   auto *GV = new llvm::GlobalVariable(
-      CGM.getModule(), TIType, /*Constant=*/true, getLinkageForRTTI(T),
+      CGM.getModule(), TIType, /*isConstant=*/true, getLinkageForRTTI(T),
       llvm::ConstantStruct::get(TIType, Fields), StringRef(MangledName));
   GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
   GV->setSection(".xdata");

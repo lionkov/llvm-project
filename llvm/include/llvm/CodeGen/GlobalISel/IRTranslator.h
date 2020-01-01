@@ -213,8 +213,8 @@ private:
   bool translateStore(const User &U, MachineIRBuilder &MIRBuilder);
 
   /// Translate an LLVM string intrinsic (memcpy, memset, ...).
-  bool translateMemfunc(const CallInst &CI, MachineIRBuilder &MIRBuilder,
-                        unsigned ID);
+  bool translateMemFunc(const CallInst &CI, MachineIRBuilder &MIRBuilder,
+                        Intrinsic::ID ID);
 
   void getStackGuard(Register DstReg, MachineIRBuilder &MIRBuilder);
 
@@ -242,6 +242,10 @@ private:
   /// If \p Offsets is not empty it will be cleared first.
   bool valueIsSplit(const Value &V,
                     SmallVectorImpl<uint64_t> *Offsets = nullptr);
+
+  /// Common code for translating normal calls or invokes.
+  bool translateCallSite(const ImmutableCallSite &CS,
+                         MachineIRBuilder &MIRBuilder);
 
   /// Translate call instruction.
   /// \pre \p U is a call instruction.
@@ -448,6 +452,7 @@ private:
 
   bool translateAtomicCmpXchg(const User &U, MachineIRBuilder &MIRBuilder);
   bool translateAtomicRMW(const User &U, MachineIRBuilder &MIRBuilder);
+  bool translateFence(const User &U, MachineIRBuilder &MIRBuilder);
 
   // Stubs to keep the compiler happy while we implement the rest of the
   // translation.
@@ -463,9 +468,6 @@ private:
   bool translateCatchSwitch(const User &U, MachineIRBuilder &MIRBuilder) {
     return false;
   }
-  bool translateFence(const User &U, MachineIRBuilder &MIRBuilder) {
-    return false;
-  }
   bool translateAddrSpaceCast(const User &U, MachineIRBuilder &MIRBuilder) {
     return translateCast(TargetOpcode::G_ADDRSPACE_CAST, U, MIRBuilder);
   }
@@ -479,6 +481,9 @@ private:
     return false;
   }
   bool translateUserOp2(const User &U, MachineIRBuilder &MIRBuilder) {
+    return false;
+  }
+  bool translateFreeze(const User &U, MachineIRBuilder &MIRBuilder) {
     return false;
   }
 
@@ -515,6 +520,10 @@ private:
   // True when either the Target Machine specifies no optimizations or the
   // function has the optnone attribute.
   bool EnableOpts = false;
+
+  /// True when the block contains a tail call. This allows the IRTranslator to
+  /// stop translating such blocks early.
+  bool HasTailCall = false;
 
   /// Switch analysis and optimization.
   class GISelSwitchLowering : public SwitchCG::SwitchLowering {

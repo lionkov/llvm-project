@@ -180,7 +180,7 @@ def Q15 : ARMReg<15, "q15", [D30, D31]>;
 // models the APSR when it's accessed by some special instructions. In such cases
 // it has the same encoding as PC.
 def CPSR       : ARMReg<0,  "cpsr">;
-def APSR       : ARMReg<1,  "apsr">;
+def APSR       : ARMReg<15, "apsr">;
 def APSR_NZCV  : ARMReg<15, "apsr_nzcv">;
 def SPSR       : ARMReg<2,  "spsr">;
 def FPSCR      : ARMReg<3,  "fpscr">;
@@ -227,9 +227,10 @@ def GPR : RegisterClass<"ARM", [i32], 32, (add (sequence "R%u", 0, 12),
   // know how to spill them. If we make our prologue/epilogue code smarter at
   // some point, we can go back to using the above allocation orders for the
   // Thumb1 instructions that know how to use hi regs.
-  let AltOrders = [(add LR, GPR), (trunc GPR, 8)];
+  let AltOrders = [(add LR, GPR), (trunc GPR, 8),
+                   (add (trunc GPR, 8), R12, LR, (shl GPR, 8))];
   let AltOrderSelect = [{
-      return 1 + MF.getSubtarget<ARMSubtarget>().isThumb1Only();
+      return MF.getSubtarget<ARMSubtarget>().getGPRAllocationOrder(MF);
   }];
   let DiagnosticString = "operand must be a register in range [r0, r15]";
 }
@@ -238,9 +239,10 @@ def GPR : RegisterClass<"ARM", [i32], 32, (add (sequence "R%u", 0, 12),
 // certain operand slots, particularly as the destination.  Primarily
 // useful for disassembly.
 def GPRnopc : RegisterClass<"ARM", [i32], 32, (sub GPR, PC)> {
-  let AltOrders = [(add LR, GPRnopc), (trunc GPRnopc, 8)];
+  let AltOrders = [(add LR, GPRnopc), (trunc GPRnopc, 8),
+                   (add (trunc GPRnopc, 8), R12, LR, (shl GPRnopc, 8))];
   let AltOrderSelect = [{
-      return 1 + MF.getSubtarget<ARMSubtarget>().isThumb1Only();
+      return MF.getSubtarget<ARMSubtarget>().getGPRAllocationOrder(MF);
   }];
   let DiagnosticString = "operand must be a register in range [r0, r14]";
 }
@@ -295,9 +297,10 @@ def GPRlr : RegisterClass<"ARM", [i32], 32, (add LR)>;
 // or SP (R13 or R15) are used. The ARM ISA refers to these operands
 // via the BadReg() pseudo-code description.
 def rGPR : RegisterClass<"ARM", [i32], 32, (sub GPR, SP, PC)> {
-  let AltOrders = [(add LR, rGPR), (trunc rGPR, 8)];
+  let AltOrders = [(add LR, rGPR), (trunc rGPR, 8),
+                   (add (trunc rGPR, 8), R12, LR, (shl rGPR, 8))];
   let AltOrderSelect = [{
-      return 1 + MF.getSubtarget<ARMSubtarget>().isThumb1Only();
+      return MF.getSubtarget<ARMSubtarget>().getGPRAllocationOrder(MF);
   }];
   let DiagnosticType = "rGPR";
 }
@@ -483,12 +486,20 @@ def DPair : RegisterClass<"ARM", [v16i8, v8i16, v4i32, v2i64, v4f32, v2f64],
 
 // Pseudo-registers representing even-odd pairs of GPRs from R1 to R13/SP.
 // These are needed by instructions (e.g. ldrexd/strexd) requiring even-odd GPRs.
-def Tuples2R : RegisterTuples<[gsub_0, gsub_1],
-                              [(add R0, R2, R4, R6, R8, R10, R12),
-                               (add R1, R3, R5, R7, R9, R11, SP)]>;
+def Tuples2Rnosp : RegisterTuples<[gsub_0, gsub_1],
+                                  [(add R0, R2, R4, R6, R8, R10),
+                                   (add R1, R3, R5, R7, R9, R11)]>;
+
+def Tuples2Rsp   : RegisterTuples<[gsub_0, gsub_1],
+                                  [(add R12), (add SP)]>;
 
 // Register class representing a pair of even-odd GPRs.
-def GPRPair : RegisterClass<"ARM", [untyped], 64, (add Tuples2R)> {
+def GPRPair : RegisterClass<"ARM", [untyped], 64, (add Tuples2Rnosp, Tuples2Rsp)> {
+  let Size = 64; // 2 x 32 bits, we have no predefined type of that size.
+}
+
+// Register class representing a pair of even-odd GPRs, except (R12, SP).
+def GPRPairnosp : RegisterClass<"ARM", [untyped], 64, (add Tuples2Rnosp)> {
   let Size = 64; // 2 x 32 bits, we have no predefined type of that size.
 }
 

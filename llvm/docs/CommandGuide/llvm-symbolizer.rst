@@ -28,6 +28,12 @@ Object files can be specified together with the addresses either on standard
 input or as positional arguments on the command-line, following any "DATA" or
 "CODE" prefix.
 
+:program:`llvm-symbolizer` parses options from the environment variable
+``LLVM_SYMBOLIZER_OPTS`` after parsing options from the command line.
+``LLVM_SYMBOLIZER_OPTS`` is primarily useful for supplementing the command-line
+options when :program:`llvm-symbolizer` is invoked by another program or
+runtime.
+
 EXAMPLES
 --------
 
@@ -213,7 +219,7 @@ OPTIONS
   style is set to ``GNU``, the tool follows the style of GNU's **addr2line**.
   The differences from the ``LLVM`` style are:
   
-  * Does not print column of a source code location.
+  * Does not print the column of a source code location.
 
   * Does not add an empty line after the report for an address.
 

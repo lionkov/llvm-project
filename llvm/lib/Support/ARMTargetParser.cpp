@@ -176,10 +176,8 @@ bool ARM::getFPUFeatures(unsigned FPUKind, std::vector<StringRef> &Features) {
     // exist).
 
     {"+fpregs", "-fpregs", FPUVersion::VFPV2, FPURestriction::SP_D16},
-    {"+vfp2", "-vfp2", FPUVersion::VFPV2, FPURestriction::None},
-    {"+vfp2d16", "-vfp2d16", FPUVersion::VFPV2, FPURestriction::D16},
-    {"+vfp2d16sp", "-vfp2d16sp", FPUVersion::VFPV2, FPURestriction::SP_D16},
-    {"+vfp2sp", "-vfp2sp", FPUVersion::VFPV2, FPURestriction::None},
+    {"+vfp2", "-vfp2", FPUVersion::VFPV2, FPURestriction::D16},
+    {"+vfp2sp", "-vfp2sp", FPUVersion::VFPV2, FPURestriction::SP_D16},
     {"+vfp3", "-vfp3", FPUVersion::VFPV3, FPURestriction::None},
     {"+vfp3d16", "-vfp3d16", FPUVersion::VFPV3, FPURestriction::D16},
     {"+vfp3d16sp", "-vfp3d16sp", FPUVersion::VFPV3, FPURestriction::SP_D16},
@@ -195,7 +193,7 @@ bool ARM::getFPUFeatures(unsigned FPUKind, std::vector<StringRef> &Features) {
     {"+fp-armv8sp", "-fp-armv8sp", FPUVersion::VFPV5, FPURestriction::None},
     {"+fullfp16", "-fullfp16", FPUVersion::VFPV5_FULLFP16, FPURestriction::SP_D16},
     {"+fp64", "-fp64", FPUVersion::VFPV2, FPURestriction::D16},
-    {"+d32", "-d32", FPUVersion::VFPV2, FPURestriction::None},
+    {"+d32", "-d32", FPUVersion::VFPV3, FPURestriction::None},
   };
 
   for (const auto &Info: FPUFeatureInfoList) {
@@ -409,30 +407,12 @@ bool ARM::getExtensionFeatures(unsigned Extensions,
   if (Extensions == AEK_INVALID)
     return false;
 
-  if (Extensions & AEK_CRC)
-    Features.push_back("+crc");
-  else
-    Features.push_back("-crc");
-
-  if (Extensions & AEK_DSP)
-    Features.push_back("+dsp");
-  else
-    Features.push_back("-dsp");
-
-  if (Extensions & AEK_FP16FML)
-    Features.push_back("+fp16fml");
-  else
-    Features.push_back("-fp16fml");
-
-  if (Extensions & AEK_RAS)
-    Features.push_back("+ras");
-  else
-    Features.push_back("-ras");
-
-  if (Extensions & AEK_DOTPROD)
-    Features.push_back("+dotprod");
-  else
-    Features.push_back("-dotprod");
+  for (const auto AE : ARCHExtNames) {
+    if ((Extensions & AE.ID) == AE.ID && AE.Feature)
+      Features.push_back(AE.Feature);
+    else if (AE.NegFeature)
+      Features.push_back(AE.NegFeature);
+  }
 
   return getHWDivFeatures(Extensions, Features);
 }
@@ -508,16 +488,30 @@ static unsigned findDoublePrecisionFPU(unsigned InputFPUKind) {
   return ARM::FK_INVALID;
 }
 
+static unsigned getAEKID(StringRef ArchExtName) {
+  for (const auto AE : ARM::ARCHExtNames)
+    if (AE.getName() == ArchExtName)
+      return AE.ID;
+  return ARM::AEK_INVALID;
+}
+
 bool ARM::appendArchExtFeatures(
   StringRef CPU, ARM::ArchKind AK, StringRef ArchExt,
   std::vector<StringRef> &Features) {
-  StringRef StandardFeature = getArchExtFeature(ArchExt);
-  if (!StandardFeature.empty()) {
-    Features.push_back(StandardFeature);
-    return true;
-  }
 
+  size_t StartingNumFeatures = Features.size();
   const bool Negated = stripNegationPrefix(ArchExt);
+  unsigned ID = getAEKID(ArchExt);
+
+  if (ID == AEK_INVALID)
+    return false;
+
+  for (const auto AE : ARCHExtNames) {
+    if (Negated && (AE.ID & ID) == ID && AE.NegFeature)
+      Features.push_back(AE.NegFeature);
+    else if (AE.ID == ID && AE.Feature)
+      Features.push_back(AE.Feature);
+  }
 
   if (CPU == "")
     CPU = "generic";
@@ -537,7 +531,7 @@ bool ARM::appendArchExtFeatures(
     }
     return ARM::getFPUFeatures(FPUKind, Features);
   }
-  return false;
+  return StartingNumFeatures != Features.size();
 }
 
 StringRef ARM::getHWDivName(unsigned HWDivKind) {

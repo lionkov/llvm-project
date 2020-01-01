@@ -116,6 +116,7 @@ public:
     bool
     operator != (const lldb::SBCompileUnit &rhs) const;
 
+#ifdef SWIGPYTHON
     %pythoncode %{
         def __iter__(self):
             '''Iterate over all line entries in a lldb.SBCompileUnit object.'''
@@ -126,12 +127,10 @@ public:
             object.'''
             return self.GetNumLineEntries()
 
-        __swig_getmethods__["file"] = GetFileSpec
-        if _newclass: file = property(GetFileSpec, None, doc='''A read only property that returns the same result an lldb object that represents the source file (lldb.SBFileSpec) for the compile unit.''')
-
-        __swig_getmethods__["num_line_entries"] = GetNumLineEntries
-        if _newclass: num_line_entries = property(GetNumLineEntries, None, doc='''A read only property that returns the number of line entries in a compile unit as an integer.''')
+        file = property(GetFileSpec, None, doc='''A read only property that returns the same result an lldb object that represents the source file (lldb.SBFileSpec) for the compile unit.''')
+        num_line_entries = property(GetNumLineEntries, None, doc='''A read only property that returns the number of line entries in a compile unit as an integer.''')
     %}
+#endif
 };
 
 } // namespace lldb

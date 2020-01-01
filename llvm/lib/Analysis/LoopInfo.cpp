@@ -34,6 +34,7 @@
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/PassManager.h"
+#include "llvm/InitializePasses.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
@@ -105,7 +106,8 @@ bool Loop::makeLoopInvariant(Instruction *I, bool &Changed,
   I->moveBefore(InsertPt);
   if (MSSAU)
     if (auto *MUD = MSSAU->getMemorySSA()->getMemoryAccess(I))
-      MSSAU->moveToPlace(MUD, InsertPt->getParent(), MemorySSA::End);
+      MSSAU->moveToPlace(MUD, InsertPt->getParent(),
+                         MemorySSA::BeforeTerminator);
 
   // There is possibility of hoisting this instruction above some arbitrary
   // condition. Any metadata defined on it can be control dependent on this
@@ -359,6 +361,44 @@ bool Loop::isAuxiliaryInductionVariable(PHINode &AuxIndVar,
   return SE.isLoopInvariant(IndDesc.getStep(), this);
 }
 
+BranchInst *Loop::getLoopGuardBranch() const {
+  if (!isLoopSimplifyForm())
+    return nullptr;
+
+  BasicBlock *Preheader = getLoopPreheader();
+  assert(Preheader && getLoopLatch() &&
+         "Expecting a loop with valid preheader and latch");
+
+  // Loop should be in rotate form.
+  if (!isRotatedForm())
+    return nullptr;
+
+  // Disallow loops with more than one unique exit block, as we do not verify
+  // that GuardOtherSucc post dominates all exit blocks.
+  BasicBlock *ExitFromLatch = getUniqueExitBlock();
+  if (!ExitFromLatch)
+    return nullptr;
+
+  BasicBlock *ExitFromLatchSucc = ExitFromLatch->getUniqueSuccessor();
+  if (!ExitFromLatchSucc)
+    return nullptr;
+
+  BasicBlock *GuardBB = Preheader->getUniquePredecessor();
+  if (!GuardBB)
+    return nullptr;
+
+  assert(GuardBB->getTerminator() && "Expecting valid guard terminator");
+
+  BranchInst *GuardBI = dyn_cast<BranchInst>(GuardBB->getTerminator());
+  if (!GuardBI || GuardBI->isUnconditional())
+    return nullptr;
+
+  BasicBlock *GuardOtherSucc = (GuardBI->getSuccessor(0) == Preheader)
+                                   ? GuardBI->getSuccessor(1)
+                                   : GuardBI->getSuccessor(0);
+  return (GuardOtherSucc == ExitFromLatchSucc) ? GuardBI : nullptr;
+}
+
 bool Loop::isCanonical(ScalarEvolution &SE) const {
   InductionDescriptor IndDesc;
   if (!getInductionDescriptor(SE, IndDesc))
@@ -432,8 +472,11 @@ bool Loop::isLoopSimplifyForm() const {
 bool Loop::isSafeToClone() const {
   // Return false if any loop blocks contain indirectbrs, or there are any calls
   // to noduplicate functions.
+  // FIXME: it should be ok to clone CallBrInst's if we correctly update the
+  // operand list to reflect the newly cloned labels.
   for (BasicBlock *BB : this->blocks()) {
-    if (isa<IndirectBrInst>(BB->getTerminator()))
+    if (isa<IndirectBrInst>(BB->getTerminator()) ||
+        isa<CallBrInst>(BB->getTerminator()))
       return false;
 
     for (Instruction &I : *BB)
@@ -1009,6 +1052,10 @@ MDNode *llvm::makePostTransformationMetadata(LLVMContext &Context,
 // LoopInfo implementation
 //
 
+LoopInfoWrapperPass::LoopInfoWrapperPass() : FunctionPass(ID) {
+  initializeLoopInfoWrapperPassPass(*PassRegistry::getPassRegistry());
+}
+
 char LoopInfoWrapperPass::ID = 0;
 INITIALIZE_PASS_BEGIN(LoopInfoWrapperPass, "loops", "Natural Loop Information",
                       true, true)
@@ -1036,7 +1083,7 @@ void LoopInfoWrapperPass::verifyAnalysis() const {
 
 void LoopInfoWrapperPass::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.setPreservesAll();
-  AU.addRequired<DominatorTreeWrapperPass>();
+  AU.addRequiredTransitive<DominatorTreeWrapperPass>();
 }
 
 void LoopInfoWrapperPass::print(raw_ostream &OS, const Module *) const {
