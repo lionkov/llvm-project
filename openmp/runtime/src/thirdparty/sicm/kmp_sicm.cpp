@@ -52,7 +52,6 @@ void __kmp_init_sicm() {
 #if KMP_OS_UNIX && KMP_DYNAMIC_LIB
 	h_sicm = dlopen("libsicm.so", RTLD_LAZY);
 	if (!h_sicm) {
-//		printf("can't load libsicm.so: %s\n", dlerror());
 		KE_TRACE(25, ("can't load libsicm.so: %s\n", dlerror()));
 		goto error;
 	}
@@ -77,19 +76,14 @@ void __kmp_init_sicm() {
 	kmp_sicm_devs = p_sicm_init();
 	kmp_init_allocator_p = kmp_sicm_init_allocator;
 	kmp_sicm_init_device_list(&kmp_sicm_default_devs, SICM_DRAM);
-//	printf("__kmp_init_sicm: Default memspace: %d devices\n", kmp_sicm_default_devs.count);
 	KE_TRACE(25, ("__kmp_init_sicm: Default memspace: %d devices\n", kmp_sicm_default_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_large_cap_devs, SICM_OPTANE);
-//	printf("__kmp_init_sicm: Large-capacity memspace: %d devices\n", kmp_sicm_large_cap_devs.count);
 	KE_TRACE(25, ("__kmp_init_sicm: Large-capacity memspace: %d devices\n", kmp_sicm_large_cap_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_const_devs, -1);
-//	printf("__kmp_init_sicm: Const memspace: %d devices\n", kmp_sicm_const_devs.count);
 	KE_TRACE(25, ("__kmp_init_sicm: Constant memspace: %d devices\n", kmp_sicm_const_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_high_bw_devs, SICM_KNL_HBM);
-//	printf("__kmp_init_sicm: High-bandwidth memspace: %d devices\n", kmp_sicm_high_bw_devs.count);
 	KE_TRACE(25, ("__kmp_init_sicm: High-bandwidth memspace: %d devices\n", kmp_sicm_high_bw_devs.count));
 	kmp_sicm_init_device_list(&kmp_sicm_low_lat_devs, -1);
-//	printf("__kmp_init_sicm: Low-latency memspace: %d devices\n", kmp_sicm_low_lat_devs.count);
 	KE_TRACE(25, ("__kmp_init_sicm: Low-latency memspace: %d devices\n", kmp_sicm_low_lat_devs.count));
 
         for(int i = 0; i < 9; i++)
